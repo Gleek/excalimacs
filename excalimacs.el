@@ -242,7 +242,7 @@ When PATH is non-nil, refresh blocks referring to that drawing."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (derived-mode-p 'org-mode)
-        (when (bound-and-true-p excalimacs-org-mode)
+        (when (bound-and-true-p excalimacs-minor-mode)
           (excalimacs-org-refresh path))
         (org-display-inline-images t t)))))
 
@@ -352,7 +352,7 @@ When PATH is non-nil, it is accepted for targeted refresh callers."
     (define-key map (kbd "C-d") #'excalimacs-org-delete-forward)
     map))
 
-(defvar excalimacs-org-mode-map
+(defvar excalimacs-minor-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "DEL") #'excalimacs-org-delete-backward)
     (define-key map (kbd "<backspace>") #'excalimacs-org-delete-backward)
@@ -360,11 +360,14 @@ When PATH is non-nil, it is accepted for targeted refresh callers."
     (define-key map (kbd "C-d") #'excalimacs-org-delete-forward)
     map))
 
-(define-minor-mode excalimacs-org-mode
-  "Render searchable Excalidraw blocks as their canonical PNG files."
+;;;###autoload
+(define-minor-mode excalimacs-minor-mode
+  "Render Excalidraw blocks and open their PNG links in Excalimacs."
   :lighter " Excali"
-  (if excalimacs-org-mode
+  (if excalimacs-minor-mode
       (progn
+        (cl-pushnew '("\\.excalidraw\\.png\\'" . excalimacs--open-preview)
+                    org-file-apps :test #'equal)
         (add-hook 'after-save-hook #'excalimacs-org-refresh nil t)
         (excalimacs-org-refresh))
     (remove-hook 'after-save-hook #'excalimacs-org-refresh t)
@@ -390,7 +393,7 @@ When PATH is non-nil, it is accepted for targeted refresh callers."
                   (goto-char body-begin)
                   (insert (mapconcat #'identity lines "\n"))
                   (unless (null lines) (insert "\n"))))))
-          (when (bound-and-true-p excalimacs-org-mode)
+          (when (bound-and-true-p excalimacs-minor-mode)
             (excalimacs-org-refresh))
           (when (and blocks (not was-modified) buffer-file-name
                      (file-exists-p buffer-file-name))
@@ -429,13 +432,6 @@ When PATH is non-nil, it is accepted for targeted refresh callers."
    (if (file-exists-p (string-remove-suffix ".png" path))
        (string-remove-suffix ".png" path)
      path)))
-
-;;;###autoload
-(defun excalimacs-initialize ()
-  "Make Excalidraw PNG links open their drawings in Excalimacs."
-  (cl-pushnew '("\\.excalidraw\\.png\\'" . excalimacs--open-preview)
-              org-file-apps :test #'equal)
-  (excalimacs-org-mode 1))
 
 (httpd-servlet api/preview application/json (_path _query request)
   (let ((path (excalimacs--session-path request)))
@@ -524,7 +520,7 @@ otherwise reuses the interrupted response buffer, corrupting both replies."
     (make-directory excalimacs-directory t)
     (when (file-exists-p path) (user-error "Drawing already exists: %s" path))
     (insert (format "#+begin_excalidraw :file %S\n#+end_excalidraw" path))
-    (when (bound-and-true-p excalimacs-org-mode) (excalimacs-org-refresh))
+    (when (bound-and-true-p excalimacs-minor-mode) (excalimacs-org-refresh))
     (excalimacs-open path)))
 
 ;;;###autoload

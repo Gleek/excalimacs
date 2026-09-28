@@ -126,7 +126,7 @@
           (with-temp-buffer
             (org-mode)
             (insert (format "Before\n#+begin_excalidraw :file %S\n#+end_excalidraw\nAfter" file))
-            (excalimacs-org-mode 1)
+            (excalimacs-minor-mode 1)
             (goto-char (point-min))
             (search-forward "After")
             (backward-char (length "After"))

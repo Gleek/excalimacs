@@ -12,7 +12,7 @@ Tested with Emacs 30. The browser app is bundled, so Node.js is not needed to us
            :files (:defaults "dist"))
   :custom
   (excalimacs-directory "~/path/to/drawings")
-  :hook (org-mode . excalimacs-initialize))
+  :hook (org-mode . excalimacs-minor-mode))
 ```
 
 Elpaca installs the declared `simple-httpd` dependency. For a local checkout, add this directory to `load-path`, install `simple-httpd`, and configure Emacs:
@@ -20,10 +20,10 @@ Elpaca installs the declared `simple-httpd` dependency. For a local checkout, ad
 ```elisp
 (require 'excalimacs)
 (setq excalimacs-directory "~/path/to/drawings")
-(add-hook 'org-mode-hook #'excalimacs-initialize)
+(add-hook 'org-mode-hook #'excalimacs-minor-mode)
 ```
 
-In an Org buffer, run `M-x excalimacs-create-drawing`. It inserts an `excalidraw` block and opens the browser editor. The first render creates its `.excalidraw.png`; later saves atomically replace that file and update the searchable text in the Org block. If the Org buffer had no unsaved edits, Excalimacs saves the updated block to disk so ripgrep can find it immediately. Otherwise, save the Org buffer when ready. With `excalimacs-org-mode` enabled, the whole block is displayed as the PNG. Press `RET` on it to edit, or Backspace/Delete to remove the block. `excalimacs-delete-file` controls whether the PNG is also deleted: `ask` (default), `t`, or `nil`. Save the Org buffer to persist block removal. Run `M-x excalimacs-open` to edit an existing embedded PNG directly. Legacy `.excalidraw` files can still be opened.
+In an Org buffer, run `M-x excalimacs-create-drawing`. It inserts an `excalidraw` block and opens the browser editor. The first render creates its `.excalidraw.png`; later saves atomically replace that file and update the searchable text in the Org block. If the Org buffer had no unsaved edits, Excalimacs saves the updated block to disk so ripgrep can find it immediately. Otherwise, save the Org buffer when ready. With `excalimacs-minor-mode` enabled, the whole block is displayed as the PNG. Press `RET` on it to edit, or Backspace/Delete to remove the block. `excalimacs-delete-file` controls whether the PNG is also deleted: `ask` (default), `t`, or `nil`. Save the Org buffer to persist block removal. Run `M-x excalimacs-open` to edit an existing embedded PNG directly. Legacy `.excalidraw` files can still be opened.
 
 If using `org-excalidraw`, disable its file watcher and old file opener while trying Excalimacs. They still launch the Excalidraw PWA and invoke excalirender.
 
