@@ -1,5 +1,7 @@
 # Excalimacs
 
+<img src="src/assets/excalimacs.svg" alt="Excalimacs logo" width="180">
+
 Excalidraw editing for Org files. New drawings are single `.excalidraw.png` files: Org displays the PNG while Excalidraw's complete editable scene is embedded in its metadata. The surrounding Org block keeps a generated plain-text projection so ordinary tools such as ripgrep can find text in a drawing. No Node server runs while editing.
 
 ## Install with Elpaca
