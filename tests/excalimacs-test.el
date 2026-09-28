@@ -93,11 +93,7 @@
             (should-error (excalimacs--save path old-hash initial)
                           :type 'file-already-exists))
           (should (equal (excalimacs--read path) edited))
-          (let* ((backup-dir (expand-file-name
-                              ".excalidraw-backups/drawing.excalidraw" directory))
-                 (backups (directory-files backup-dir t "\\.excalidraw\\'")))
-            (should (= (length backups) 1))
-            (should (equal (excalimacs--read (car backups)) initial))))
+          (should-not (file-exists-p (expand-file-name ".excalidraw-backups" directory))))
       (delete-directory directory t))))
 
 (ert-deftest excalimacs-create-inserts-searchable-block ()
@@ -144,12 +140,12 @@
          (png-a (concat (unibyte-string 137 80 78 71 13 10 26 10) "first"))
          (png-b (concat (unibyte-string 137 80 78 71 13 10 26 10) "second")))
     (unwind-protect
-        (let ((hash-a (excalimacs--backup-and-write path png-a nil)))
+        (let ((hash-a (excalimacs--write-png path png-a nil)))
           (should (equal hash-a (excalimacs--hash-bytes png-a)))
-          (should-error (excalimacs--backup-and-write path png-b "stale")
+          (should-error (excalimacs--write-png path png-b "stale")
                         :type 'file-already-exists)
           (should (equal (excalimacs--read-bytes path) png-a))
-          (should (equal (excalimacs--backup-and-write path png-b hash-a)
+          (should (equal (excalimacs--write-png path png-b hash-a)
                          (excalimacs--hash-bytes png-b))))
       (delete-directory directory t))))
 

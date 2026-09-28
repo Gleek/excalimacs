@@ -109,21 +109,10 @@ The value `ask' prompts before deleting; nil keeps the file."
     (unless (equal (excalimacs--hash previous) base-hash)
       (signal 'file-already-exists '("Drawing changed on disk")))
     (unless (equal previous text)
-      (let* ((backups (expand-file-name
-                       (concat ".excalidraw-backups/" (file-name-nondirectory path))
-                       (file-name-directory path)))
-             (backup (expand-file-name
-                      (format "%s-%s.excalidraw"
-                              (format-time-string "%Y%m%dT%H%M%S") (excalimacs--token))
-                      backups)))
-        (make-directory backups t)
-        (copy-file path backup nil)
-        (excalimacs--atomic-write path (encode-coding-string text 'utf-8))
-        (let ((old (sort (directory-files backups t "\\.excalidraw\\'") #'string<)))
-          (dolist (file (butlast old 20)) (delete-file file)))))
+      (excalimacs--atomic-write path (encode-coding-string text 'utf-8)))
     (excalimacs--hash text)))
 
-(defun excalimacs--backup-and-write (path bytes base-hash)
+(defun excalimacs--write-png (path bytes base-hash)
   "Atomically write BYTES to PATH if BASE-HASH still matches.
 BASE-HASH is nil only when creating a new file."
   (let ((previous (and (file-exists-p path) (excalimacs--read-bytes path))))
@@ -131,18 +120,6 @@ BASE-HASH is nil only when creating a new file."
         (unless (equal (excalimacs--hash-bytes previous) base-hash)
           (signal 'file-already-exists '("Drawing changed on disk")))
       (when base-hash (signal 'file-already-exists '("Drawing was removed"))))
-    (when previous
-      (let* ((backups (expand-file-name
-                       (concat ".excalidraw-backups/" (file-name-nondirectory path))
-                       (file-name-directory path)))
-             (backup (expand-file-name
-                      (format "%s-%s.png" (format-time-string "%Y%m%dT%H%M%S")
-                              (excalimacs--token))
-                      backups)))
-        (make-directory backups t)
-        (copy-file path backup nil)
-        (let ((old (sort (directory-files backups t "\\.png\\'") #'string<)))
-          (dolist (file (butlast old 20)) (delete-file file)))))
     (excalimacs--atomic-write path bytes)
     (excalimacs--hash-bytes bytes)))
 
@@ -202,7 +179,7 @@ BASE-HASH is nil only when creating a new file."
           (let ((bytes (cadr (assoc "Content" request)))
                 (base (cadr (assoc "X-Base-Hash" request))))
             (unless (excalimacs--png-p bytes) (error "Invalid PNG"))
-            (let ((hash (excalimacs--backup-and-write path bytes base)))
+            (let ((hash (excalimacs--write-png path bytes base)))
               (excalimacs--refresh-org-images path)
               (excalimacs--json-reply 200 `(("hash" . ,hash))))))
          (t

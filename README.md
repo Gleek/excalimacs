@@ -29,9 +29,9 @@ If using `org-excalidraw`, disable its file watcher and old file opener while tr
 
 ## Saving
 
-Each browser view has a separate random token bound to one file. Edits autosave after a short pause; `Cmd+S` or `Ctrl+S` saves immediately. Emacs checks the file hash before replacing it, writes a backup, and rejects stale saves. The latest 20 backups remain in `.excalidraw-backups/`.
+Each browser view has a separate random token bound to one file. Edits autosave after a short pause; `Cmd+S` or `Ctrl+S` saves immediately. Emacs checks the file hash before replacing it and rejects stale saves.
 
-After saving, the browser exports the same drawing revision to PNG with `exportEmbedScene` enabled and posts it to Emacs. Emacs accepts it only when the base hash matches the current file, updates matching Org blocks, and refreshes their images. The previous PNG is backed up before replacement. A dot in the browser tab title means saving is unfinished. On a conflict, the editor offers an unsaved copy for download.
+After saving, the browser exports the same drawing revision to PNG with `exportEmbedScene` enabled and posts it to Emacs. Emacs accepts it only when the base hash matches the current file, updates matching Org blocks, and refreshes their images. A dot in the browser tab title means saving is unfinished. On a conflict, the editor offers an unsaved copy for download.
 
 The Open menu action is disabled for Emacs-hosted sessions; open another drawing from Emacs. Live collaboration is not connected.
 
@@ -46,7 +46,7 @@ npm ci
 npm run build
 ```
 
-Run `npm test` for the Emacs tests, with `simple-httpd.el` on the load path: `EMACSLOADPATH=/path/to/simple-httpd: npm test`. These cover backups, stale-save rejection, Unicode request handling, and Org link creation. Full browser-to-Emacs integration has been exercised manually.
+Run `npm test` for the Emacs tests, with `simple-httpd.el` on the load path: `EMACSLOADPATH=/path/to/simple-httpd: npm test`. These cover stale-save rejection, Unicode request handling, and Org link creation. Full browser-to-Emacs integration has been exercised manually.
 
 Excalidraw uses upstream's `next` development channel, with an exact version pinned in `package.json` and `package-lock.json`. It exports the command palette directly, so no bundle patch is needed.
 
