@@ -2,21 +2,17 @@
 
 Excalidraw editing for Org files. New drawings are single `.excalidraw.png` files: Org displays the PNG while Excalidraw's complete editable scene is embedded in its metadata. The surrounding Org block keeps a generated plain-text projection so ordinary tools such as ripgrep can find text in a drawing. No Node server runs while editing.
 
-## License
-
-Excalimacs's own code is licensed under [GPLv3](LICENSE). The bundled Excalidraw code remains under its [MIT license](LICENSE.EXCALIDRAW). Other bundled dependencies and fonts retain their respective upstream licenses; they are not relicensed by this project.
-
 ## Install with Elpaca
 
 Tested with Emacs 30. The browser app is bundled, so Node.js is not needed to use Excalimacs:
 
 ```elisp
-(elpaca '(excalimacs :host github :repo "Gleek/excalimacs"
-                    :files (:defaults "dist")))
-(elpaca-wait)
-(require 'excalimacs)
-(setq excalimacs-directory "~/path/to/drawings")
-(add-hook 'org-mode-hook #'excalimacs-initialize)
+(use-package excalimacs
+  :ensure (:host github :repo "Gleek/excalimacs"
+           :files (:defaults "dist"))
+  :custom
+  (excalimacs-directory "~/path/to/drawings")
+  :hook (org-mode . excalimacs-initialize))
 ```
 
 Elpaca installs the declared `simple-httpd` dependency. For a local checkout, add this directory to `load-path`, install `simple-httpd`, and configure Emacs:
@@ -63,3 +59,7 @@ npm run upgrade:excalidraw
 This installs and pins the newest `next` version and rebuilds the browser app (including fonts). It stops if a command fails; it does not roll back dependency changes. Save pending edits before upgrading, then refresh the browser afterward. No Emacs restart is needed.
 
 Most upgrades should work without application changes, but development builds can change APIs or behavior. A passing build does not check every UI interaction: after upgrading, try editing text, saving, PNG previews, and the command palette. Upstream breaking changes may require application changes. The `next` channel is the latest published development build, which can lag behind the head of `master`.
+
+## License
+
+Excalimacs is licensed under [GPLv3](LICENSE). Excalidraw and the bundled fonts have their own licenses.
