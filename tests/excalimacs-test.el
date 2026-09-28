@@ -1,0 +1,171 @@
+;;; excalimacs-test.el --- File safety tests for Excalimacs -*- lexical-binding: t; -*-
+
+(require 'ert)
+(require 'excalimacs)
+
+(ert-deftest excalimacs-overlapping-responses-have-separate-buffers ()
+  (let ((excalimacs--owns-server t))
+    (httpd--ensure-buffer
+      (insert "outer response")
+      (setq httpd--header-sent t)
+      (let ((outer (current-buffer)))
+        (excalimacs--isolate-request
+         (lambda ()
+           (httpd--ensure-buffer
+             (should-not (eq outer (current-buffer)))
+             (should-not httpd--header-sent)
+             (should (equal (buffer-string) ""))
+             (insert "inner response")
+             (setq httpd--header-sent t))))
+        (should (equal (buffer-string) "outer response"))
+        (should httpd--header-sent)))))
+
+(ert-deftest excalimacs-open-in-app-uses-authorized-session ()
+  (let ((excalimacs--sessions (make-hash-table :test #'equal))
+        (path "/tmp/drawing with spaces.excalidraw")
+        (allowed t)
+        (exit-status 0)
+        status calls)
+    (puthash "test" path excalimacs--sessions)
+    (cl-letf (((symbol-function 'excalimacs--allowed-origin-p) (lambda (_) allowed))
+              ((symbol-function 'call-process)
+               (lambda (&rest args) (push args calls) exit-status))
+              ((symbol-function 'httpd-send-header)
+               (lambda (_proc _mime code &rest _headers)
+                 (setq status code httpd--header-sent t))))
+      (dolist (case '(("GET" "test" t 405)
+                      ("POST" "unknown" t 403)
+                      ("POST" "test" nil 403)
+                      ("POST" "test" t 200)))
+        (setq allowed (nth 2 case))
+        (httpd/api/open-in-app nil "/api/open-in-app" nil
+                              `((,(car case) "/api/open-in-app" "HTTP/1.1")
+                                ("X-Editor-Token" ,(nth 1 case))))
+        (should (= status (nth 3 case))))
+      (should (equal calls (list (list (if (eq system-type 'darwin) "open" "xdg-open")
+                                      nil nil nil path))))
+      (setq exit-status 1)
+      (httpd/api/open-in-app nil "/api/open-in-app" nil
+                            '(("POST" "/api/open-in-app" "HTTP/1.1")
+                              ("X-Editor-Token" "test")))
+      (should (= status 400)))))
+
+(ert-deftest excalimacs-save-unicode-http-body ()
+  (let* ((directory (make-temp-file "excalimacs-unicode-" t))
+         (path (expand-file-name "drawing.excalidraw" directory))
+         (initial "{\"type\":\"excalidraw\",\"elements\":[],\"appState\":{},\"files\":{}}")
+         (edited "{\"type\":\"excalidraw\",\"elements\":[{\"type\":\"text\",\"text\":\"😀 👨‍👩‍👧‍👦 café اردو\"}],\"appState\":{},\"files\":{}}")
+         (excalimacs--sessions (make-hash-table :test #'equal))
+         (status nil))
+    (unwind-protect
+        (progn
+          (with-temp-file path (insert initial))
+          (puthash "test" path excalimacs--sessions)
+          ;; simple-httpd inserts binary process output into a multibyte buffer.
+          (let ((body (with-temp-buffer
+                        (insert (encode-coding-string
+                                 (json-serialize
+                                  `((baseHash . ,(excalimacs--hash initial))
+                                    (text . ,edited))) 'utf-8))
+                        (buffer-string))))
+            (cl-letf (((symbol-function 'excalimacs--allowed-origin-p) (lambda (_) t))
+                      ((symbol-function 'httpd-send-header)
+                       (lambda (_proc _mime code &rest _headers)
+                         (setq status code httpd--header-sent t))))
+              (httpd/api/drawing nil "/api/drawing" nil
+                                 `(("PUT" "/api/drawing" "HTTP/1.1")
+                                   ("X-Editor-Token" "test") ("Content" ,body)))))
+          (should (= status 200))
+          (should (equal (excalimacs--read path) edited)))
+      (delete-directory directory t))))
+
+(ert-deftest excalimacs-save-rejects-stale-writers ()
+  (let* ((directory (make-temp-file "excalimacs-test-" t))
+         (path (expand-file-name "drawing.excalidraw" directory))
+         (initial "{\"type\":\"excalidraw\",\"elements\":[],\"appState\":{},\"files\":{}}")
+         (edited "{\"type\":\"excalidraw\",\"elements\":[{\"id\":\"one\",\"type\":\"text\",\"text\":\"hello\"}],\"appState\":{},\"files\":{}}"))
+    (unwind-protect
+        (progn
+          (with-temp-file path (insert initial))
+          (let ((old-hash (excalimacs--hash initial)))
+            (should (equal (excalimacs--save path old-hash edited)
+                           (excalimacs--hash edited)))
+            (should-error (excalimacs--save path old-hash initial)
+                          :type 'file-already-exists))
+          (should (equal (excalimacs--read path) edited))
+          (let* ((backup-dir (expand-file-name
+                              ".excalidraw-backups/drawing.excalidraw" directory))
+                 (backups (directory-files backup-dir t "\\.excalidraw\\'")))
+            (should (= (length backups) 1))
+            (should (equal (excalimacs--read (car backups)) initial))))
+      (delete-directory directory t))))
+
+(ert-deftest excalimacs-create-inserts-searchable-block ()
+  (let ((directory (make-temp-file "excalimacs-org-" t))
+        (opened nil))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (let ((excalimacs-directory directory))
+            (cl-letf (((symbol-function 'excalimacs-open)
+                       (lambda (path) (setq opened path))))
+              (excalimacs-create-drawing "example")))
+          (should (equal opened (expand-file-name "example.excalidraw.png" directory)))
+          (should (equal (buffer-string)
+                         (format "#+begin_excalidraw :file %S\n#+end_excalidraw" opened)))
+          (should-not (file-exists-p opened)))
+      (delete-directory directory t))))
+
+(ert-deftest excalimacs-org-delete-drawing-removes-block-and-optional-file ()
+  (let* ((directory (make-temp-file "excalimacs-delete-" t))
+         (file (expand-file-name "drawing.excalidraw.png" directory))
+         (png (concat (unibyte-string 137 80 78 71 13 10 26 10) "data")))
+    (unwind-protect
+        (dolist (setting '(nil t ask))
+          (with-temp-file file (set-buffer-multibyte nil) (insert png))
+          (with-temp-buffer
+            (org-mode)
+            (insert (format "Before\n#+begin_excalidraw :file %S\n#+end_excalidraw\nAfter" file))
+            (excalimacs-org-mode 1)
+            (goto-char (point-min))
+            (search-forward "After")
+            (backward-char (length "After"))
+            (should (eq (key-binding (kbd "DEL")) #'excalimacs-org-delete-backward))
+            (let ((excalimacs-delete-file setting))
+              (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
+                (excalimacs-org-delete-backward)))
+            (should (equal (buffer-string) "Before\nAfter"))
+            (should (eq (file-exists-p file) (if setting nil t)))))
+      (delete-directory directory t))))
+
+(ert-deftest excalimacs-png-save-is-atomic-and-rejects-stale-writers ()
+  (let* ((directory (make-temp-file "excalimacs-png-" t))
+         (path (expand-file-name "drawing.excalidraw.png" directory))
+         (png-a (concat (unibyte-string 137 80 78 71 13 10 26 10) "first"))
+         (png-b (concat (unibyte-string 137 80 78 71 13 10 26 10) "second")))
+    (unwind-protect
+        (let ((hash-a (excalimacs--backup-and-write path png-a nil)))
+          (should (equal hash-a (excalimacs--hash-bytes png-a)))
+          (should-error (excalimacs--backup-and-write path png-b "stale")
+                        :type 'file-already-exists)
+          (should (equal (excalimacs--read-bytes path) png-a))
+          (should (equal (excalimacs--backup-and-write path png-b hash-a)
+                         (excalimacs--hash-bytes png-b))))
+      (delete-directory directory t))))
+
+(ert-deftest excalimacs-updates-searchable-block-text ()
+  (let* ((directory (make-temp-file "excalimacs-block-" t))
+         (org-file (expand-file-name "note.org" directory))
+         (drawing (expand-file-name "drawing.excalidraw.png" directory)))
+    (unwind-protect
+        (with-temp-buffer
+          (setq buffer-file-name org-file)
+          (org-mode)
+          (insert "Before\n#+begin_excalidraw :file drawing.excalidraw.png\nold text\n#+end_excalidraw\nAfter\n")
+          (excalimacs--replace-block-text drawing '("Authentication" "PostgreSQL"))
+          (should (equal (buffer-string)
+                         "Before\n#+begin_excalidraw :file drawing.excalidraw.png\nAuthentication\nPostgreSQL\n#+end_excalidraw\nAfter\n")))
+      (delete-directory directory t))))
+
+(provide 'excalimacs-test)
+;;; excalimacs-test.el ends here

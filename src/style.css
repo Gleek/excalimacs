@@ -1,0 +1,10 @@
+html, body, #root { margin: 0; height: 100%; }
+body { font-family: system-ui, sans-serif; }
+.app { height: 100%; position: relative; }
+.app > .excalidraw { height: 100%; }
+aside { position: absolute; top: 8px; right: 8px; z-index: 10; max-width: 360px; padding: 12px; border-radius: 8px; background: #fff3d6; color: #222; font-size: 13px; box-shadow: 0 2px 12px #0003; }
+aside button { display: block; margin-top: 8px; cursor: pointer; }
+.message { padding: 24px; }
+.excalidraw .welcome-screen-center { gap: 4rem; }
+.excalidraw .welcome-screen-center__heading { font-size: 2.25rem; line-height: 2.7rem; }
+.welcome-logo { width: 200px; height: 248px; object-fit: contain; }

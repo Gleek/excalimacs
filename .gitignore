@@ -1,0 +1,5 @@
+node_modules/
+public/fonts/
+.local-design/
+.DS_Store
+*.elc
