@@ -2,7 +2,7 @@
 
 <img src="src/assets/excalimacs.svg" alt="Excalimacs logo" width="180">
 
-Excalidraw editing for Org files. New drawings are single `.excalidraw.png` files: Org displays the PNG while Excalidraw's complete editable scene is embedded in its metadata. The surrounding Org block keeps a generated plain-text projection so ordinary tools such as ripgrep can find text in a drawing. No Node server runs while editing.
+Excalidraw editing in Emacs buffers. New drawings are single `.excalidraw.png` files: Excalidraw's complete editable scene is embedded in the PNG metadata. Org, Markdown, and programming-mode templates keep a generated plain-text projection so tools such as ripgrep can find text in a drawing. No Node server runs while editing.
 
 ## Install with Elpaca
 
@@ -14,7 +14,8 @@ Tested with Emacs 30. The browser app is bundled, so Node.js is not needed to us
            :files (:defaults "dist"))
   :custom
   (excalimacs-directory "~/path/to/drawings")
-  :hook (org-mode . excalimacs-minor-mode))
+  :hook ((org-mode markdown-mode prog-mode agent-shell-mode)
+         . excalimacs-minor-mode))
 ```
 
 Elpaca installs the declared `simple-httpd` dependency. For a local checkout, add this directory to `load-path`, install `simple-httpd`, and configure Emacs:
@@ -25,7 +26,18 @@ Elpaca installs the declared `simple-httpd` dependency. For a local checkout, ad
 (add-hook 'org-mode-hook #'excalimacs-minor-mode)
 ```
 
-In an Org buffer, run `M-x excalimacs-create-drawing`. It inserts an `excalidraw` block and opens the browser editor. The first render creates its `.excalidraw.png`; later saves atomically replace that file and update the searchable text in the Org block. If the Org buffer had no unsaved edits, Excalimacs saves the updated block to disk so ripgrep can find it immediately. Otherwise, save the Org buffer when ready. With `excalimacs-minor-mode` enabled, the whole block is displayed as the PNG. Press `RET` on it to edit, or Backspace/Delete to remove the block. `excalimacs-delete-file` controls whether the PNG is also deleted: `ask` (default), `t`, or `nil`. Save the Org buffer to persist block removal. Run `M-x excalimacs-open` to edit an existing embedded PNG directly. Legacy `.excalidraw` files can still be opened.
+Run `M-x excalimacs-create-drawing` in any buffer. It inserts a template for the major mode and opens the browser editor. The first render creates its `.excalidraw.png`; later saves atomically replace that file and update searchable text in templates that include it. Org, Markdown, and programming modes include text. The agent-shell template is `@path`, which agent-shell sends as an image attachment when supported. A plain-text template covers other modes. Excalimacs does not edit submitted agent-shell history.
+
+`excalimacs-minor-mode` controls display and deletion. With it enabled, a drawing template is shown as the PNG and protected from editing. Press `RET` or click the image to open it. Delete at its start or Backspace just after it removes the template; other keys retain their major-mode bindings. `excalimacs-delete-file` controls whether the PNG is also deleted: `ask` (default), `t`, or `nil`. Disable the minor mode to see and edit the full template as plain text. The creation command works with the minor mode off. Run `M-x excalimacs-open` to edit an existing PNG directly. Legacy `.excalidraw` files can still be opened.
+
+Customize `excalimacs-templates` to add or override formats. An entry has a major-mode symbol and a property list. `:begin` must contain `{file}`; `:end` closes a multi-line template. Omit `:text` or set it to `t` to include searchable text, or set it to `nil` for a path-only template. For example:
+
+```elisp
+(add-to-list 'excalimacs-templates
+             '(my-mode :begin "DRAW {file}" :end "END" :text t))
+```
+
+Use `:text-prefix` and `:text-suffix` to wrap each generated text line. Use `:comment t` to generate a template from a programming mode's `comment-start` and `comment-end`. Modes without a matching entry use the plain-text fallback.
 
 If using `org-excalidraw`, disable its file watcher and old file opener while trying Excalimacs. They still launch the Excalidraw PWA and invoke excalirender.
 

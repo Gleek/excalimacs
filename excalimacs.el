@@ -1,9 +1,9 @@
-;;; excalimacs.el --- Edit local Excalidraw files from Org -*- lexical-binding: t; -*-
+;;; excalimacs.el --- Edit local Excalidraw files from Emacs -*- lexical-binding: t; -*-
 
 ;; Package-Requires: ((emacs "30.1") (simple-httpd "1.7"))
 
 ;;; Commentary:
-;; Edit Excalidraw drawings in Org with the bundled browser application.
+;; Edit Excalidraw drawings in Emacs with the bundled browser application.
 
 ;;; Code:
 
@@ -13,9 +13,8 @@
 (require 'subr-x)
 (require 'url)
 (require 'org-id)
-(require 'ol)
 
-(defgroup excalimacs nil "Local Excalidraw editor for Org." :group 'org)
+(defgroup excalimacs nil "Local Excalidraw editor." :group 'applications)
 
 (defcustom excalimacs-dist-directory
   (expand-file-name "dist" (file-name-directory (or load-file-name buffer-file-name)))
@@ -48,8 +47,22 @@ The value `ask' prompts before deleting; nil keeps the file."
 
 (defvar excalimacs--sessions (make-hash-table :test #'equal))
 (defvar excalimacs--owns-server nil)
-(defvar-local excalimacs--org-overlays nil)
-(defvar excalimacs-org-block-map)
+(defvar-local excalimacs--overlays nil)
+(defvar excalimacs-minor-mode)
+(defvar excalimacs-block-map)
+
+(defcustom excalimacs-templates
+  '((org-mode :begin "#+begin_excalidraw :file {file}" :end "#+end_excalidraw")
+    (markdown-mode :begin "<!-- excalidraw: {file}" :end "-->")
+    (agent-shell-mode :begin "@{file}" :text nil)
+    (prog-mode :comment t)
+    (default :begin "excalidraw: {file}" :end "end-excalidraw"))
+  "Templates used to insert and find drawings in major modes.
+Each entry is (MODE . PROPERTIES).  :begin contains one {file}
+placeholder; :end is optional.  :text defaults to t and may be nil.
+:comment uses the current buffer's comment syntax instead of strings.
+More specific major modes take precedence over their parents."
+  :type 'sexp)
 
 (defconst excalimacs--empty-drawing
   "{\"type\":\"excalidraw\",\"version\":2,\"elements\":[],\"appState\":{\"viewBackgroundColor\":\"#ffffff\"},\"files\":{}}")
@@ -353,7 +366,7 @@ BASE-HASH is nil only when creating a new file."
                 (base (cadr (assoc "X-Base-Hash" request))))
             (unless (excalimacs--png-p bytes) (error "Invalid PNG"))
             (let ((hash (excalimacs--write-png path bytes base)))
-              (excalimacs--refresh-org-images path)
+              (excalimacs--refresh-images path)
               (excalimacs--json-reply 200 `(("hash" . ,hash))))))
          (t
           (let* ((data (json-parse-string (decode-coding-string
@@ -386,100 +399,135 @@ BASE-HASH is nil only when creating a new file."
       (error
        (excalimacs--json-reply 400 `(("error" . ,(error-message-string err))))))))
 
-(defun excalimacs--refresh-org-images (&optional path)
-  "Refresh inline images and Excalimacs blocks in open Org buffers.
-When PATH is non-nil, refresh blocks referring to that drawing."
+(defun excalimacs--template ()
+  "Return the template for the current major mode."
+  (let ((entry (seq-find (lambda (item) (eq (car item) major-mode)) excalimacs-templates)))
+    (unless entry
+      (setq entry (or (seq-find (lambda (item)
+                                  (and (not (eq (car item) 'default))
+                                       (derived-mode-p (car item))))
+                                excalimacs-templates)
+                      (assq 'default excalimacs-templates))))
+    (when entry
+      (let ((template (cdr entry)))
+        (if (plist-get template :comment)
+            (let ((start (string-trim (or comment-start "")))
+                  (end (string-trim (or comment-end ""))))
+              (if (string-empty-p start)
+                  (cdr (assq 'default excalimacs-templates))
+                (list :begin (format "%s excalidraw: {file}%s" start
+                                     (if (string-empty-p end) "" (concat " " end)))
+                      :end (format "%s /excalidraw%s" start
+                                   (if (string-empty-p end) "" (concat " " end)))
+                      :text-prefix (concat start " ")
+                      :text-suffix (if (string-empty-p end) "" (concat " " end)))))
+          template)))))
+
+(defun excalimacs--template-regexp (begin)
+  "Return a regexp matching BEGIN's file placeholder."
+  (unless (and (stringp begin) (string-match "{file}" begin))
+    (error "Excalimacs template :begin needs {file}"))
+  (concat "^" (regexp-quote (substring begin 0 (match-beginning 0)))
+          "\\(\".*\"\\|[^[:space:]]+\\)"
+          (regexp-quote (substring begin (match-end 0))) "$"))
+
+(defun excalimacs--blocks (&optional wanted-path)
+  "Find drawing templates in this buffer, optionally for WANTED-PATH."
+  (when-let* ((template (excalimacs--template))
+              (begin (plist-get template :begin)))
+    (let ((regexp (excalimacs--template-regexp begin))
+          (end-line (plist-get template :end))
+          blocks)
+      (save-excursion
+        (goto-char (point-min))
+        (while (re-search-forward regexp nil t)
+          (let* ((start (line-beginning-position))
+                 (literal (match-string-no-properties 1))
+                 (path (condition-case nil
+                           (let ((value (if (string-prefix-p "\"" literal)
+                                            (car (read-from-string literal))
+                                          literal)))
+                             (and (stringp value)
+                                  (expand-file-name value
+                                                    (or (and buffer-file-name
+                                                             (file-name-directory buffer-file-name))
+                                                        default-directory))))
+                         (error nil)))
+                 (end (if end-line
+                          (and (re-search-forward (concat "^" (regexp-quote end-line) "$") nil t)
+                               (line-end-position))
+                        (line-end-position))))
+            (when (and path end
+                       (or (not wanted-path)
+                           (equal (file-truename path) (file-truename wanted-path))))
+              (push (list start end path) blocks))))
+      (nreverse blocks)))))
+
+(defun excalimacs-refresh (&optional _path)
+  "Display drawing templates in the current buffer when the minor mode is on."
+  (interactive)
+  (mapc #'delete-overlay excalimacs--overlays)
+  (setq excalimacs--overlays nil)
+  (when excalimacs-minor-mode
+    (dolist (block (excalimacs--blocks))
+      (pcase-let ((`(,begin ,end ,file) block))
+        (when (file-readable-p file)
+          (clear-image-cache file)
+          (let ((overlay (make-overlay begin end nil t nil)))
+            (overlay-put overlay 'display
+                         (create-image file nil nil :width excalimacs-preview-width))
+            (overlay-put overlay 'excalimacs-path file)
+            (overlay-put overlay 'read-only 'excalimacs)
+            (overlay-put overlay 'mouse-face 'highlight)
+            (overlay-put overlay 'help-echo "RET or mouse-1: edit drawing")
+            (overlay-put overlay 'keymap excalimacs-block-map)
+            (push overlay excalimacs--overlays)))))))
+
+(defalias 'excalimacs-org-refresh #'excalimacs-refresh)
+
+(defun excalimacs--refresh-images (&optional _path)
+  "Refresh displayed drawings in open buffers."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
-      (when (derived-mode-p 'org-mode)
-        (when (bound-and-true-p excalimacs-minor-mode)
-          (excalimacs-org-refresh path))
-        (org-display-inline-images t t)))))
+      (when (bound-and-true-p excalimacs-minor-mode)
+        (excalimacs-refresh)))))
 
-(defun excalimacs--block-path (parameters)
-  "Resolve the :file value in block PARAMETERS."
-  (when (string-match "\\(?:^\\|[[:space:]]\\):file[[:space:]]+\\(\"[^\"]+\"\\|[^[:space:]]+\\)" parameters)
-    (let ((value (match-string 1 parameters)))
-      (when (and (> (length value) 1) (eq (aref value 0) ?\"))
-        (setq value (car (read-from-string value))))
-      (expand-file-name value (or (and buffer-file-name (file-name-directory buffer-file-name))
-                                  default-directory)))))
-
-(defun excalimacs--org-blocks (&optional wanted-path)
-  "Return Excalimacs blocks in the current buffer.
-If WANTED-PATH is non-nil, only return blocks referring to it."
-  (let (blocks)
-    (save-excursion
-      (goto-char (point-min))
-      (while (re-search-forward "^[ \\t]*#\\+begin_excalidraw\\(.*\\)$" nil t)
-        (let* ((begin (line-beginning-position))
-               (path (excalimacs--block-path (match-string-no-properties 1))))
-          (when (re-search-forward "^[ \\t]*#\\+end_excalidraw[ \\t]*$" nil t)
-            ;; Keep the terminating newline visible so the image does not
-            ;; share a display line with the following heading or block.
-            (let ((end (line-end-position)))
-              (when (and path (or (not wanted-path)
-                                  (equal (file-truename path) (file-truename wanted-path))))
-                (push (list begin end path) blocks)))))))
-    (nreverse blocks)))
-
-(defun excalimacs-org-refresh (&optional path)
-  "Display Excalidraw blocks as their PNG images.
-When PATH is non-nil, it is accepted for targeted refresh callers."
-  (interactive)
-  (ignore path)
-  (mapc #'delete-overlay excalimacs--org-overlays)
-  (setq excalimacs--org-overlays nil)
-  (dolist (block (excalimacs--org-blocks))
-    (pcase-let ((`(,begin ,end ,file) block))
-      (when (file-readable-p file)
-        (clear-image-cache file)
-        (let ((overlay (make-overlay begin end nil t nil)))
-          (overlay-put overlay 'display
-                       (create-image file nil nil :width excalimacs-preview-width))
-          (overlay-put overlay 'excalimacs-path file)
-          (overlay-put overlay 'mouse-face 'highlight)
-          (overlay-put overlay 'help-echo "RET or mouse-1: edit drawing")
-          (overlay-put overlay 'keymap excalimacs-org-block-map)
-          (push overlay excalimacs--org-overlays))))))
-
-(defun excalimacs-org-open-at-point (&optional event)
-  "Open the Excalidraw block at point."
+(defun excalimacs-open-at-point (&optional event)
+  "Open the displayed drawing at point."
   (interactive (list (and (mouse-event-p last-input-event) last-input-event)))
   (when event (mouse-set-point event))
-  (let ((path (seq-some (lambda (overlay) (overlay-get overlay 'excalimacs-path))
-                        (overlays-at (point)))))
-    (unless path (user-error "No Excalidraw block at point"))
-    (excalimacs-open path)))
+  (let ((overlay (excalimacs--drawing-at (point))))
+    (unless overlay (user-error "No Excalidraw drawing at point"))
+    (excalimacs-open (overlay-get overlay 'excalimacs-path))))
 
 (defun excalimacs--drawing-at (position)
   "Return the drawing overlay covering POSITION, if any."
   (seq-find (lambda (overlay) (overlay-get overlay 'excalimacs-path))
             (overlays-at position)))
 
-(defun excalimacs-org-delete-backward ()
-  "Delete the displayed drawing before point as one character."
-  (interactive)
-  (let ((overlay (or (excalimacs--drawing-at (point))
-                     (and (> (point) (point-min))
-                          (excalimacs--drawing-at (1- (point))))
-                     (and (> (point) (1+ (point-min)))
-                          (eq (char-before (point)) ?\n)
-                          (excalimacs--drawing-at (- (point) 2))))))
-    (if overlay
-        (excalimacs--delete-drawing overlay)
-      (call-interactively #'org-delete-backward-char))))
+(defun excalimacs--drawing-before-point ()
+  "Return the displayed drawing directly before point."
+  (or (excalimacs--drawing-at (point))
+      (seq-find (lambda (overlay) (= (overlay-end overlay) (point)))
+                excalimacs--overlays)
+      (and (> (point) (point-min))
+           (eq (char-before) ?\n)
+           (seq-find (lambda (overlay) (= (overlay-end overlay) (1- (point))))
+                     excalimacs--overlays))))
 
-(defun excalimacs-org-delete-forward ()
-  "Delete the displayed drawing at point as one character."
+(defun excalimacs-delete-backward ()
+  "Delete the displayed drawing before point."
   (interactive)
-  (let ((overlay (excalimacs--drawing-at (point))))
-    (if overlay
-        (excalimacs--delete-drawing overlay)
-      (call-interactively #'delete-char))))
+  (excalimacs--delete-drawing (excalimacs--drawing-before-point)))
+
+(defun excalimacs-delete-forward ()
+  "Delete the displayed drawing at point."
+  (interactive)
+  (excalimacs--delete-drawing (excalimacs--drawing-at (point))))
 
 (defun excalimacs--delete-drawing (overlay)
   "Delete the block represented by OVERLAY and optionally its PNG."
+  (unless overlay (user-error "No Excalidraw drawing at point"))
   (let* ((file (overlay-get overlay 'excalimacs-path))
          (begin (overlay-start overlay))
          (end (overlay-end overlay))
@@ -488,63 +536,73 @@ When PATH is non-nil, it is accepted for targeted refresh callers."
                                ('ask (y-or-n-p (format "Delete drawing file %s? " file)))
                                ('nil nil)
                                (_ t)))))
-    (delete-region begin (if (eq (char-after end) ?\n) (1+ end) end))
+    (let ((inhibit-read-only '(excalimacs)))
+      (delete-region begin (if (eq (char-after end) ?\n) (1+ end) end)))
     (when delete-file-p (delete-file file))
-    (excalimacs-org-refresh)))
+    (excalimacs-refresh)))
 
-(defvar excalimacs-org-block-map
+(defvar excalimacs-block-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'excalimacs-org-open-at-point)
-    (define-key map [mouse-1] #'excalimacs-org-open-at-point)
-    (define-key map (kbd "DEL") #'excalimacs-org-delete-backward)
-    (define-key map (kbd "<backspace>") #'excalimacs-org-delete-backward)
-    (define-key map (kbd "<delete>") #'excalimacs-org-delete-forward)
-    (define-key map (kbd "C-d") #'excalimacs-org-delete-forward)
+    (define-key map (kbd "RET") #'excalimacs-open-at-point)
+    (define-key map [mouse-1] #'excalimacs-open-at-point)
+    (define-key map (kbd "DEL") #'excalimacs-delete-backward)
+    (define-key map (kbd "<backspace>") #'excalimacs-delete-backward)
+    (define-key map (kbd "<delete>") #'excalimacs-delete-forward)
+    (define-key map (kbd "C-d") #'excalimacs-delete-forward)
     map))
 
-(defvar excalimacs-minor-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "DEL") #'excalimacs-org-delete-backward)
-    (define-key map (kbd "<backspace>") #'excalimacs-org-delete-backward)
-    (define-key map (kbd "<delete>") #'excalimacs-org-delete-forward)
-    (define-key map (kbd "C-d") #'excalimacs-org-delete-forward)
-    map))
+(defvar excalimacs-minor-mode-map (make-sparse-keymap))
+;; Keep the map object on reload: enabled buffers already refer to it.
+(setcdr excalimacs-minor-mode-map nil)
+(dolist (key '("DEL" "<backspace>"))
+  (define-key excalimacs-minor-mode-map (kbd key)
+    '(menu-item "Excalimacs delete" excalimacs-delete-backward
+                :filter (lambda (command)
+                          (when (excalimacs--drawing-before-point) command)))))
+(dolist (key '("<delete>" "C-d"))
+  (define-key excalimacs-minor-mode-map (kbd key)
+    '(menu-item "Excalimacs delete" excalimacs-delete-forward
+                :filter (lambda (command)
+                          (when (excalimacs--drawing-at (point)) command)))))
 
 ;;;###autoload
 (define-minor-mode excalimacs-minor-mode
-  "Render Excalidraw blocks and open their PNG links in Excalimacs."
+  "Display drawing templates as images in the current buffer."
   :lighter " Excali"
   (if excalimacs-minor-mode
       (progn
-        (cl-pushnew '("\\.excalidraw\\.png\\'" . excalimacs--open-preview)
-                    org-file-apps :test #'equal)
-        (add-hook 'after-save-hook #'excalimacs-org-refresh nil t)
-        (excalimacs-org-refresh))
-    (remove-hook 'after-save-hook #'excalimacs-org-refresh t)
-    (mapc #'delete-overlay excalimacs--org-overlays)
-    (setq excalimacs--org-overlays nil)))
+        (add-hook 'after-save-hook #'excalimacs-refresh nil t)
+        (excalimacs-refresh))
+    (remove-hook 'after-save-hook #'excalimacs-refresh t)
+    (excalimacs-refresh)))
 
 (defun excalimacs--replace-block-text (path lines)
-  "Replace searchable text in open Org blocks for PATH with LINES."
+  "Replace searchable text in open templates for PATH with LINES."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
-      (when (derived-mode-p 'org-mode)
-        (let ((blocks (reverse (excalimacs--org-blocks path)))
+      (when-let* ((template (excalimacs--template))
+                  ((or (not (plist-member template :text))
+                       (plist-get template :text)))
+                  ((plist-get template :end)))
+        (let ((blocks (reverse (excalimacs--blocks path)))
               (was-modified (buffer-modified-p)))
           (dolist (block blocks)
             (pcase-let ((`(,begin ,end ,_file) block))
-              (save-excursion
-                (goto-char begin)
-                (forward-line 1)
-                (let ((body-begin (point)))
-                  (goto-char end)
-                  (re-search-backward "^[ \\t]*#\\+end_excalidraw")
-                  (delete-region body-begin (line-beginning-position))
-                  (goto-char body-begin)
-                  (insert (mapconcat #'identity lines "\n"))
-                  (unless (null lines) (insert "\n"))))))
+              (let ((inhibit-read-only '(excalimacs)))
+                (save-excursion
+                  (goto-char begin)
+                  (forward-line 1)
+                  (let ((body-begin (point))
+                        (prefix (or (plist-get template :text-prefix) ""))
+                        (suffix (or (plist-get template :text-suffix) "")))
+                    (goto-char end)
+                    (forward-line 0)
+                    (delete-region body-begin (point))
+                    (goto-char body-begin)
+                    (dolist (line lines)
+                      (insert prefix line suffix "\n")))))))
           (when (bound-and-true-p excalimacs-minor-mode)
-            (excalimacs-org-refresh))
+            (excalimacs-refresh))
           (when (and blocks (not was-modified) buffer-file-name
                      (file-exists-p buffer-file-name))
             (save-buffer)))))))
@@ -576,13 +634,6 @@ When PATH is non-nil, it is accepted for targeted refresh callers."
       (error
        (excalimacs--json-reply 400 `(("error" . ,(error-message-string err))))))))
 
-(defun excalimacs--open-preview (path _link)
-  "Open Excalidraw PNG PATH, or its legacy JSON source."
-  (excalimacs-open
-   (if (file-exists-p (string-remove-suffix ".png" path))
-       (string-remove-suffix ".png" path)
-     path)))
-
 (httpd-servlet api/preview application/json (_path _query request)
   (let ((path (excalimacs--session-path request)))
     (condition-case err
@@ -600,7 +651,7 @@ When PATH is non-nil, it is accepted for targeted refresh callers."
             (unless (excalimacs--png-p png)
               (error "Invalid PNG"))
             (excalimacs--atomic-write (concat path ".png") png)
-            (excalimacs--refresh-org-images (concat path ".png"))
+            (excalimacs--refresh-images (concat path ".png"))
             (excalimacs--json-reply 200 '(("updated" . t))))))
       (error
        (excalimacs--json-reply 400 `(("error" . ,(error-message-string err))))))))
@@ -654,11 +705,11 @@ otherwise reuses the interrupted response buffer, corrupting both replies."
 
 ;;;###autoload
 (defun excalimacs-create-drawing (name)
-  "Insert a searchable Org block for NAME and open its PNG drawing."
+  "Insert the current mode's template for NAME and open its drawing."
   (interactive (list (read-string "Drawing name: ")))
-  (unless (derived-mode-p 'org-mode)
-    (user-error "Create drawings from an Org buffer"))
-  (let* ((name (string-trim name))
+  (let* ((template (or (excalimacs--template)
+                       (user-error "No Excalimacs template for %s" major-mode)))
+         (name (string-trim name))
          (filename (cond ((string-empty-p name) (concat (org-id-uuid) ".excalidraw.png"))
                          ((string-suffix-p ".excalidraw.png" name) name)
                          (t (concat (file-name-sans-extension name) ".excalidraw.png"))))
@@ -668,8 +719,15 @@ otherwise reuses the interrupted response buffer, corrupting both replies."
       (user-error "Drawing name must be a filename"))
     (make-directory excalimacs-directory t)
     (when (file-exists-p path) (user-error "Drawing already exists: %s" path))
-    (insert (format "#+begin_excalidraw :file %S\n#+end_excalidraw" path))
-    (when (bound-and-true-p excalimacs-minor-mode) (excalimacs-org-refresh))
+    (let* ((begin (plist-get template :begin))
+           (placeholder (string-match "{file}" begin)))
+      (unless placeholder (error "Excalimacs template :begin needs {file}"))
+      (insert (substring begin 0 placeholder)
+              (prin1-to-string path)
+              (substring begin (+ placeholder (length "{file}"))))
+      (when-let* ((end (plist-get template :end)))
+        (insert "\n" end)))
+    (when (bound-and-true-p excalimacs-minor-mode) (excalimacs-refresh))
     (excalimacs-open path)))
 
 ;;;###autoload
