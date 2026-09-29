@@ -48,6 +48,7 @@ The value `ask' prompts before deleting; nil keeps the file."
 (defvar excalimacs--sessions (make-hash-table :test #'equal))
 (defvar excalimacs--owns-server nil)
 (defvar-local excalimacs--overlays nil)
+(defvar-local excalimacs--refresh-timer nil)
 (defvar excalimacs-minor-mode)
 (defvar excalimacs-block-map)
 
@@ -427,9 +428,9 @@ BASE-HASH is nil only when creating a new file."
   "Return a regexp matching BEGIN's file placeholder."
   (unless (and (stringp begin) (string-match "{file}" begin))
     (error "Excalimacs template :begin needs {file}"))
-  (concat "^" (regexp-quote (substring begin 0 (match-beginning 0)))
-          "\\(\".*\"\\|[^[:space:]]+\\)"
-          (regexp-quote (substring begin (match-end 0))) "$"))
+  (concat (regexp-quote (substring begin 0 (match-beginning 0)))
+          "\\(\"\\(?:\\\\.\\|[^\"\\\\]\\)*\"\\|[^[:space:]]+\\)"
+          (regexp-quote (substring begin (match-end 0)))))
 
 (defun excalimacs--blocks (&optional wanted-path)
   "Find drawing templates in this buffer, optionally for WANTED-PATH."
@@ -441,7 +442,8 @@ BASE-HASH is nil only when creating a new file."
       (save-excursion
         (goto-char (point-min))
         (while (re-search-forward regexp nil t)
-          (let* ((start (line-beginning-position))
+          (let* ((start (match-beginning 0))
+                 (inline-end (match-end 0))
                  (literal (match-string-no-properties 1))
                  (path (condition-case nil
                            (let ((value (if (string-prefix-p "\"" literal)
@@ -456,8 +458,9 @@ BASE-HASH is nil only when creating a new file."
                  (end (if end-line
                           (and (re-search-forward (concat "^" (regexp-quote end-line) "$") nil t)
                                (line-end-position))
-                        (line-end-position))))
+                        inline-end)))
             (when (and path end
+                       (string-suffix-p ".excalidraw.png" path)
                        (or (not wanted-path)
                            (equal (file-truename path) (file-truename wanted-path))))
               (push (list start end path) blocks))))
@@ -477,6 +480,8 @@ BASE-HASH is nil only when creating a new file."
             (overlay-put overlay 'display
                          (create-image file nil nil :width excalimacs-preview-width))
             (overlay-put overlay 'excalimacs-path file)
+            (overlay-put overlay 'excalimacs-inline
+                         (not (plist-get (excalimacs--template) :end)))
             (overlay-put overlay 'read-only 'excalimacs)
             (overlay-put overlay 'mouse-face 'highlight)
             (overlay-put overlay 'help-echo "RET or mouse-1: edit drawing")
@@ -491,6 +496,23 @@ BASE-HASH is nil only when creating a new file."
     (with-current-buffer buffer
       (when (bound-and-true-p excalimacs-minor-mode)
         (excalimacs-refresh)))))
+
+(defun excalimacs--refresh-after-change (_begin _end _old-length)
+  "Restore image overlays displaced by buffer edits."
+  (when (and excalimacs-minor-mode
+             (not excalimacs--refresh-timer)
+             (seq-some (lambda (overlay)
+                         (<= (overlay-end overlay) (overlay-start overlay)))
+                       excalimacs--overlays))
+    (setq excalimacs--refresh-timer
+          (run-at-time 0 nil
+                       (lambda (buffer)
+                         (when (buffer-live-p buffer)
+                           (with-current-buffer buffer
+                             (setq excalimacs--refresh-timer nil)
+                             (when excalimacs-minor-mode
+                               (excalimacs-refresh)))))
+                       (current-buffer)))))
 
 (defun excalimacs-open-at-point (&optional event)
   "Open the displayed drawing at point."
@@ -537,7 +559,10 @@ BASE-HASH is nil only when creating a new file."
                                ('nil nil)
                                (_ t)))))
     (let ((inhibit-read-only '(excalimacs)))
-      (delete-region begin (if (eq (char-after end) ?\n) (1+ end) end)))
+      (delete-region begin (if (and (not (overlay-get overlay 'excalimacs-inline))
+                                    (eq (char-after end) ?\n))
+                               (1+ end)
+                             end)))
     (when delete-file-p (delete-file file))
     (excalimacs-refresh)))
 
@@ -572,8 +597,13 @@ BASE-HASH is nil only when creating a new file."
   (if excalimacs-minor-mode
       (progn
         (add-hook 'after-save-hook #'excalimacs-refresh nil t)
+        (add-hook 'after-change-functions #'excalimacs--refresh-after-change nil t)
         (excalimacs-refresh))
     (remove-hook 'after-save-hook #'excalimacs-refresh t)
+    (remove-hook 'after-change-functions #'excalimacs--refresh-after-change t)
+    (when excalimacs--refresh-timer
+      (cancel-timer excalimacs--refresh-timer)
+      (setq excalimacs--refresh-timer nil))
     (excalimacs-refresh)))
 
 (defun excalimacs--replace-block-text (path lines)

@@ -26,9 +26,9 @@ Elpaca installs the declared `simple-httpd` dependency. For a local checkout, ad
 (add-hook 'org-mode-hook #'excalimacs-minor-mode)
 ```
 
-Run `M-x excalimacs-create-drawing` in any buffer. It inserts a template for the major mode and opens the browser editor. The first render creates its `.excalidraw.png`; later saves atomically replace that file and update searchable text in templates that include it. Org, Markdown, and programming modes include text. The agent-shell template is `@path`, which agent-shell sends as an image attachment when supported. A plain-text template covers other modes. Excalimacs does not edit submitted agent-shell history.
+Run `M-x excalimacs-create-drawing` in any buffer. It inserts a template at point and opens the browser editor. The first render creates its `.excalidraw.png`; later saves atomically replace that file and update searchable text in templates that include it. Org, Markdown, and programming modes include text. The agent-shell template is `@path`, which agent-shell sends as an image attachment when supported. A plain-text template covers other modes. Excalimacs finds the saved template again when a buffer reopens and does not edit submitted agent-shell history.
 
-`excalimacs-minor-mode` controls display and deletion. With it enabled, a drawing template is shown as the PNG and protected from editing. Press `RET` or click the image to open it. Delete at its start or Backspace just after it removes the template; other keys retain their major-mode bindings. `excalimacs-delete-file` controls whether the PNG is also deleted: `ask` (default), `t`, or `nil`. Disable the minor mode to see and edit the full template as plain text. The creation command works with the minor mode off. Run `M-x excalimacs-open` to edit an existing PNG directly. Legacy `.excalidraw` files can still be opened.
+`excalimacs-minor-mode` controls display and deletion. With it enabled, a drawing template is shown as the PNG and protected from editing. In agent-shell it replaces only `@...excalidraw.png` mentions, leaving the shell prompt intact. Press `RET` or click the image to open it. Delete at its start or Backspace just after it removes the template; other keys retain their major-mode bindings. `excalimacs-delete-file` controls whether the PNG is also deleted: `ask` (default), `t`, or `nil`. Disable the minor mode to see and edit the full template as plain text. The creation command works with the minor mode off. Run `M-x excalimacs-open` to edit an existing PNG directly. Legacy `.excalidraw` files can still be opened.
 
 Customize `excalimacs-templates` to add or override formats. An entry has a major-mode symbol and a property list. `:begin` must contain `{file}`; `:end` closes a multi-line template. Omit `:text` or set it to `t` to include searchable text, or set it to `nil` for a path-only template. For example:
 
@@ -67,7 +67,15 @@ npm ci
 npm run build
 ```
 
-Run `npm test` for the Emacs tests, with `simple-httpd.el` on the load path: `EMACSLOADPATH=/path/to/simple-httpd: npm test`. These cover stale-save rejection, Unicode request handling, and Org link creation. Full browser-to-Emacs integration has been exercised manually.
+Run the ERT tests from the repository root, with `simple-httpd.el` on the load path:
+
+```sh
+EMACSLOADPATH=/path/to/simple-httpd: emacs -Q --batch -L . -l excalimacs.el -l tests/excalimacs-test.el -f ert-run-tests-batch-and-exit
+```
+
+Or use the npm wrapper: `EMACSLOADPATH=/path/to/simple-httpd: npm test`.
+
+These cover stale-save rejection, Unicode request handling, and Org link creation. Full browser-to-Emacs integration has been exercised manually.
 
 Excalidraw uses upstream's `next` development channel, with an exact version pinned in `package.json` and `package-lock.json`. It exports the command palette directly, so no bundle patch is needed.
 

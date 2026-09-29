@@ -316,5 +316,77 @@
             (should (string-prefix-p "@" (buffer-string)))))
       (delete-directory directory t))))
 
+(ert-deftest excalimacs-agent-shell-finds-only-drawing-mentions ()
+  (with-temp-buffer
+    (setq major-mode 'agent-shell-mode)
+    (insert "Codex> @\"/tmp/drawing.excalidraw.png\" and @\"/tmp/photo.png\"")
+    (let ((blocks (excalimacs--blocks)))
+      (should (= (length blocks) 1))
+      (pcase-let ((`(,begin ,end ,path) (car blocks)))
+        (should (equal (buffer-substring-no-properties begin end)
+                       "@\"/tmp/drawing.excalidraw.png\""))
+        (should (equal path "/tmp/drawing.excalidraw.png"))))))
+
+(ert-deftest excalimacs-finds-drawing-after-buffer-reload ()
+  (let ((saved "Codex> @\"/tmp/drawing.excalidraw.png\""))
+    (with-temp-buffer
+      (setq major-mode 'agent-shell-mode)
+      (insert saved)
+      (should (= (length (excalimacs--blocks)) 1)))))
+
+(ert-deftest excalimacs-restores-image-after-prompt-rewrite ()
+  (let* ((directory (make-temp-file "excalimacs-rewrite-" t))
+         (path (expand-file-name "drawing.excalidraw.png" directory))
+         (mention (format "@%S" path)))
+    (unwind-protect
+        (with-temp-buffer
+          (setq major-mode 'agent-shell-mode)
+          (insert mention)
+          (with-temp-file path (insert "png"))
+          (cl-letf (((symbol-function 'create-image) (lambda (&rest _) "image")))
+            (excalimacs-minor-mode 1)
+            (let ((inhibit-read-only t))
+              (delete-region (point-min) (point-max))
+              (insert "Codex> " mention))
+            (sleep-for 0.05)
+            (should (= (length excalimacs--overlays) 1))
+            (should (equal (buffer-substring-no-properties
+                            (overlay-start (car excalimacs--overlays))
+                            (overlay-end (car excalimacs--overlays)))
+                           mention))))
+      (delete-directory directory t))))
+
+(ert-deftest excalimacs-agent-shell-deletes-only-mention ()
+  (let* ((directory (make-temp-file "excalimacs-agent-" t))
+         (path (expand-file-name "drawing.excalidraw.png" directory)))
+    (unwind-protect
+        (with-temp-buffer
+          (setq major-mode 'agent-shell-mode)
+          (insert (format "Codex> @%S\nNext" path))
+          (with-temp-file path (insert "png"))
+          (cl-letf (((symbol-function 'create-image) (lambda (&rest _) "image")))
+            (excalimacs-minor-mode 1)
+            (goto-char (overlay-start (car excalimacs--overlays)))
+            (let ((excalimacs-delete-file nil))
+              (excalimacs-delete-forward))
+            (should (equal (buffer-string) "Codex> \nNext"))))
+      (delete-directory directory t))))
+
+(ert-deftest excalimacs-agent-shell-creates-at-point ()
+  (let ((directory (make-temp-file "excalimacs-agent-create-" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (setq major-mode 'agent-shell-mode)
+          (insert "Codex> Explain this")
+          (goto-char (+ (point-min) (length "Codex> ")))
+          (let ((excalimacs-directory directory))
+            (cl-letf (((symbol-function 'excalimacs-open) #'ignore))
+              (excalimacs-create-drawing "example")))
+          (should (equal (buffer-string)
+                         (format "Codex> @%SExplain this"
+                                 (expand-file-name "example.excalidraw.png"
+                                                   directory)))))
+      (delete-directory directory t))))
+
 (provide 'excalimacs-test)
 ;;; excalimacs-test.el ends here
