@@ -2,19 +2,32 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   CommandPalette, Excalidraw, MainMenu, WelcomeScreen, exportToBlob,
-  loadSceneOrLibraryFromBlob, serializeAsJSON,
+  loadSceneOrLibraryFromBlob, serializeAsJSON, serializeLibraryAsJSON,
 } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import "./style.css";
 import logo from "./assets/excalimacs.svg";
 
 window.EXCALIDRAW_ASSET_PATH = "/";
-const token = new URLSearchParams(location.search).get("token");
+const hashParams = new URLSearchParams(location.hash.slice(1));
+const queryParams = new URLSearchParams(location.search);
+const libraryToken = queryParams.get("libraryToken");
+let token = queryParams.get("token");
+if (!token && libraryToken) token = localStorage.getItem(`excalimacs-return:${libraryToken}`);
+if (token && !queryParams.has("token")) {
+  queryParams.set("token", token);
+  history.replaceState(null, "", `${location.pathname}?${queryParams}${location.hash}`);
+}
 
 async function api(method, payload, path = "/api/drawing") {
   const response = await fetch(path, {
     method,
-    headers: { "X-Editor-Token": token, ...(payload ? { "Content-Type": "application/json" } : {}) },
+    headers: {
+      ...(token ? { "X-Editor-Token": token } : {}),
+      ...(libraryToken && method === "POST" && path === "/api/library"
+        ? { "X-Library-Token": libraryToken } : {}),
+      ...(payload ? { "Content-Type": "application/json" } : {}),
+    },
     body: payload ? JSON.stringify(payload) : undefined,
   });
   const result = await response.json();
@@ -25,6 +38,14 @@ async function api(method, payload, path = "/api/drawing") {
   }
   return result;
 }
+
+const libraryUrl = hashParams.get("addLibrary");
+const libraryImport = libraryUrl ? api("POST", { url: libraryUrl }, "/api/library").then(() => {
+  hashParams.delete("addLibrary");
+  hashParams.delete("token");
+  history.replaceState(null, "", `${location.pathname}${location.search}${hashParams.size ? `#${hashParams}` : ""}`);
+  return true;
+}) : Promise.resolve(false);
 
 async function loadDrawing() {
   const response = await fetch("/api/drawing", {
@@ -54,11 +75,18 @@ function searchableText(text) {
 }
 
 function App() {
+  const importOnly = !token && !!libraryToken && !!libraryUrl;
   const [document, setDocument] = useState(null);
+  const [importResult, setImportResult] = useState("Importing library…");
+  const [libraryReturnUrl, setLibraryReturnUrl] = useState(null);
   const [status, setStatus] = useState("Loading…");
   const [conflict, setConflict] = useState(false);
   const [error, setError] = useState("");
   const [previewError, setPreviewError] = useState("");
+  const [libraryError, setLibraryError] = useState("");
+  const [importError, setImportError] = useState("");
+  const [libraryItems, setLibraryItems] = useState(null);
+  const [excalidrawAPI, setExcalidrawAPI] = useState(null);
   const [themePreference, setThemePreference] = useState("system");
   const [systemDark, setSystemDark] = useState(() => matchMedia("(prefers-color-scheme: dark)").matches);
   const hashRef = useRef(null);
@@ -69,8 +97,37 @@ function App() {
   const saveRef = useRef(null);
   const conflictRef = useRef(false);
   const previewPendingRef = useRef(0);
+  const libraryHashRef = useRef(null);
+  const libraryTextRef = useRef(null);
+  const librarySaveRef = useRef(Promise.resolve());
+  const importedLibraryRef = useRef(false);
 
   useEffect(() => {
+    if (!token) return;
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(`excalimacs-library:${token}`))
+      .then((digest) => {
+        const scoped = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+        localStorage.setItem(`excalimacs-return:${scoped}`, token);
+        setLibraryReturnUrl(`${location.origin}${location.pathname}?libraryToken=${scoped}`);
+      }).catch((failure) => setLibraryError(`Library link could not be prepared: ${failure.message}`));
+  }, []);
+
+  const refreshLibrary = useCallback(async () => {
+    const { library, hash } = await api("GET", null, "/api/library");
+    const text = serializeLibraryAsJSON(library.libraryItems);
+    libraryHashRef.current = hash;
+    if (text === libraryTextRef.current) return;
+    libraryTextRef.current = text;
+    setLibraryItems(library.libraryItems);
+    await excalidrawAPI?.updateLibrary({ libraryItems: library.libraryItems, merge: false });
+  }, [excalidrawAPI]);
+
+  useEffect(() => {
+    if (importOnly) {
+      libraryImport.then(() => setImportResult("Library added. Return to your Excalimacs editor."))
+        .catch((failure) => setImportResult(`Library import failed: ${failure.message}`));
+      return;
+    }
     loadDrawing().then(({ drawing, hash, name, format }) => {
       hashRef.current = hash;
       savedRef.current = serializeAsJSON(drawing.elements, drawing.appState, drawing.files, "local");
@@ -78,6 +135,49 @@ function App() {
       setDocument({ drawing, name, format });
       setStatus("Saved");
     }).catch((failure) => setError(failure.message));
+  }, []);
+
+  useEffect(() => {
+    if (importOnly) return;
+    libraryImport.catch((failure) => {
+      setImportError(`Library could not be imported: ${failure.message}`);
+    }).then(() => refreshLibrary()).catch((failure) => {
+      setLibraryError(`Library could not be loaded: ${failure.message}`);
+      setLibraryItems([]);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!excalidrawAPI || !libraryItems || importedLibraryRef.current) return;
+    libraryImport.then((imported) => {
+      if (imported) {
+        importedLibraryRef.current = true;
+        excalidrawAPI.updateLibrary({ libraryItems, merge: false, openLibraryMenu: true });
+      }
+    }).catch(() => {});
+  }, [excalidrawAPI, libraryItems]);
+
+  useEffect(() => {
+    if (!excalidrawAPI) return;
+    const timer = setInterval(() => refreshLibrary().catch((failure) =>
+      setLibraryError(`Library could not be loaded: ${failure.message}`)), 2000);
+    return () => clearInterval(timer);
+  }, [excalidrawAPI, refreshLibrary]);
+
+  const libraryChanged = useCallback((items) => {
+    const text = serializeLibraryAsJSON(items);
+    if (text === libraryTextRef.current) return Promise.resolve();
+    const pending = librarySaveRef.current.then(async () => {
+      const result = await api("PUT", { baseHash: libraryHashRef.current, text }, "/api/library");
+      libraryHashRef.current = result.hash;
+      libraryTextRef.current = text;
+      setLibraryError("");
+    }).catch((failure) => {
+      setLibraryError(`Library could not be saved: ${failure.message}. Export it from the library menu before closing.`);
+      throw failure;
+    });
+    librarySaveRef.current = pending.catch(() => {});
+    return pending;
   }, []);
 
   const renderPreview = useCallback(async (text, hash) => {
@@ -274,8 +374,10 @@ function App() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
+  if (importOnly) return <main className="message">{importResult}</main>;
   if (error && !document) return <main className="message">Could not open drawing: {error}</main>;
-  if (!document) return <main className="message">Loading drawing…</main>;
+  if (!document || !libraryItems || !libraryReturnUrl)
+    return <main className="message">Loading drawing and library…{libraryError}{importError}</main>;
   window.document.title = `${status === "Saved" ? "" : "● "}${document.name.split("/").at(-1)}`;
   const theme = themePreference === "system" ? (systemDark ? "dark" : "light") : themePreference;
 
@@ -287,7 +389,11 @@ function App() {
     {previewError && <aside role="alert">Drawing saved, but preview failed: {previewError}
       <button onClick={() => void renderPreview(savedRef.current, hashRef.current)}>Retry preview</button>
     </aside>}
-    <Excalidraw initialData={document.drawing} onChange={changed} theme={theme}
+    {libraryError && <aside role="alert">{libraryError}</aside>}
+    {importError && <aside role="alert">{importError}</aside>}
+    <Excalidraw excalidrawAPI={setExcalidrawAPI} libraryReturnUrl={libraryReturnUrl}
+      initialData={{ ...document.drawing, libraryItems }}
+      onLibraryChange={libraryChanged} onChange={changed} theme={theme}
       onThemeChange={setThemePreference}
       UIOptions={{ canvasActions: { toggleTheme: true } }}>
       <MainMenu>

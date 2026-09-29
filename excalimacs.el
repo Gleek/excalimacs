@@ -11,6 +11,7 @@
 (require 'json)
 (require 'simple-httpd)
 (require 'subr-x)
+(require 'url)
 (require 'org-id)
 (require 'ol)
 
@@ -24,6 +25,15 @@
 (defcustom excalimacs-directory "~/org-excalidraw"
   "Directory used by `excalimacs-create-drawing'."
   :type 'directory)
+
+(defcustom excalimacs-library-directory
+  (expand-file-name "excalimacs" user-emacs-directory)
+  "Directory containing Excalidraw library files."
+  :type 'directory)
+
+(defcustom excalimacs-library-file "library.excalidrawlib"
+  "Name of the Excalidraw library file in `excalimacs-library-directory'."
+  :type 'string)
 
 (defcustom excalimacs-preview-width 320
   "Maximum width in pixels for Excalidraw previews in Org buffers."
@@ -55,9 +65,7 @@ The value `ask' prompts before deleting; nil keeps the file."
 
 (defun excalimacs--read (path)
   "Read UTF-8 text at PATH."
-  (with-temp-buffer
-    (insert-file-contents-literally path)
-    (decode-coding-string (buffer-string) 'utf-8)))
+  (decode-coding-string (excalimacs--read-bytes path) 'utf-8))
 
 (defun excalimacs--read-bytes (path)
   "Read PATH without decoding it."
@@ -88,6 +96,174 @@ The value `ask' prompts before deleting; nil keeps the file."
              (hash-table-p (gethash "appState" drawing))
              (hash-table-p (gethash "files" drawing))))
     (error nil)))
+
+(defun excalimacs--library-path ()
+  "Return the configured library path."
+  (unless (and (string-suffix-p ".excalidrawlib" excalimacs-library-file)
+               (equal excalimacs-library-file
+                      (file-name-nondirectory excalimacs-library-file)))
+    (error "Library file must be a .excalidrawlib filename"))
+  (expand-file-name excalimacs-library-file excalimacs-library-directory))
+
+(defun excalimacs--parse-library (text)
+  "Parse TEXT as an Excalidraw library or signal an error."
+  (let ((library (json-parse-string text :object-type 'hash-table)))
+    (unless (and (equal (gethash "type" library) "excalidrawlib")
+                 (vectorp (or (gethash "libraryItems" library)
+                              (gethash "library" library))))
+      (error "Invalid Excalidraw library"))
+    library))
+
+(defun excalimacs--valid-library-p (text)
+  "Return non-nil if TEXT is an Excalidraw library."
+  (condition-case nil
+      (progn (excalimacs--parse-library text) t)
+    (error nil)))
+
+(defun excalimacs--library-files ()
+  "Return the configured library files."
+  (when (file-directory-p excalimacs-library-directory)
+    (directory-files excalimacs-library-directory t "\\.excalidrawlib\\'")))
+
+(defun excalimacs--file-library-items (file)
+  "Return FILE's items in the current Excalidraw library format."
+  (condition-case nil
+    (let* ((library (excalimacs--parse-library (excalimacs--read file)))
+           (items (or (gethash "libraryItems" library) (gethash "library" library))))
+      (vconcat
+       (cl-loop for item across items
+                for index from 0
+                collect (if (vectorp item)
+                            (let ((converted (make-hash-table :test #'equal)))
+                              (puthash "id" (secure-hash 'sha256
+                                                          (format "%s:%s" file index)) converted)
+                              (puthash "status" "published" converted)
+                              (puthash "created" 0 converted)
+                              (puthash "elements" item converted)
+                              converted)
+                          item))))
+    (error (error "Invalid Excalidraw library: %s" file))))
+
+(defun excalimacs--combined-library ()
+  "Return all library items from the configured directory."
+  (let ((items nil))
+    (dolist (file (excalimacs--library-files))
+      (setq items (append items (append (excalimacs--file-library-items file) nil))))
+    (vconcat items)))
+
+(defun excalimacs--download-library (address)
+  "Download an Excalidraw library from ADDRESS and return its text."
+  (unless (and (stringp address)
+               (string-match-p
+                "\\`https://libraries\\.excalidraw\\.com/libraries/[[:alnum:]_-]+/[[:alnum:]_.-]+\\.excalidrawlib\\'"
+                address))
+    (error "Invalid library URL"))
+  (let ((buffer (url-retrieve-synchronously address t t 15)))
+    (unless buffer (error "Library download failed"))
+    (unwind-protect
+        (with-current-buffer buffer
+          (unless (equal url-http-response-status 200)
+            (error "Library download returned HTTP %s" url-http-response-status))
+          (goto-char (point-min))
+          (unless (re-search-forward "\r?\n\r?\n" nil t)
+            (error "Invalid library response"))
+          (decode-coding-string (buffer-substring-no-properties (point) (point-max)) 'utf-8))
+      (kill-buffer buffer))))
+
+(defun excalimacs--library-import-session (request)
+  "Return the session authorized to import a library from REQUEST."
+  (or (excalimacs--session-path request)
+      (let ((library-token (cadr (assoc "X-Library-Token" request)))
+            found)
+        (when (stringp library-token)
+          (maphash (lambda (token session)
+                     (when (equal library-token
+                                  (secure-hash 'sha256
+                                               (concat "excalimacs-library:" token)))
+                       (setq found session)))
+                   excalimacs--sessions))
+        found)))
+
+(httpd-servlet api/library application/json (_path _query request)
+  (let* ((method (caar request))
+         (session (if (equal method "POST")
+                      (excalimacs--library-import-session request)
+                    (excalimacs--session-path request))))
+    (condition-case err
+        (cond
+         ((not session) (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         ((equal method "GET")
+          (let* ((path (excalimacs--library-path))
+                 (contents (and (file-exists-p path) (excalimacs--read path)))
+                 (library (json-parse-string
+                           "{\"type\":\"excalidrawlib\",\"version\":2,\"libraryItems\":[]}"
+                           :object-type 'hash-table)))
+            (puthash "libraryItems" (excalimacs--combined-library) library)
+            (excalimacs--json-reply
+             200 `(("library" . ,library)
+                   ("hash" . ,(if contents (excalimacs--hash contents) :null))))))
+         ((equal method "POST")
+          (unless (excalimacs--allowed-origin-p request) (error "Forbidden"))
+          (let* ((data (json-parse-string
+                        (decode-coding-string (cadr (assoc "Content" request)) 'utf-8)
+                        :object-type 'hash-table))
+                 (name (gethash "name" data))
+                 (address (gethash "url" data))
+                 (contents (if address (excalimacs--download-library address)
+                             (gethash "text" data))))
+            (when address
+              (setq name (replace-regexp-in-string
+                          "/" "-" (string-remove-prefix
+                                   "/libraries/" (url-filename (url-generic-parse-url address))))))
+            (unless (and (stringp name) (string-match-p "\\`[[:alnum:]_-]+\\.excalidrawlib\\'" name)
+                         (not (equal name excalimacs-library-file))
+                         (stringp contents) (excalimacs--valid-library-p contents))
+              (error "Invalid library import"))
+            (make-directory excalimacs-library-directory t)
+            (excalimacs--atomic-write
+             (expand-file-name name excalimacs-library-directory)
+             (encode-coding-string contents 'utf-8))
+            (excalimacs--json-reply 200 '(("ok" . t)))))
+         ((not (equal method "PUT"))
+          (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
+         ((not (excalimacs--allowed-origin-p request))
+          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         (t
+          (let* ((data (json-parse-string
+                        (decode-coding-string (cadr (assoc "Content" request)) 'utf-8)
+                        :object-type 'hash-table))
+                 (base (gethash "baseHash" data))
+                 (contents (gethash "text" data))
+                 (path (excalimacs--library-path)))
+            (when (eq base :null) (setq base nil))
+            (unless (and (or (null base) (stringp base))
+                         (stringp contents) (excalimacs--valid-library-p contents))
+              (error "Invalid library save request"))
+            (let ((previous (and (file-exists-p path) (excalimacs--read path)))
+                  (imported (make-hash-table :test #'equal)))
+              (unless (equal (and previous (excalimacs--hash previous)) base)
+                (signal 'file-already-exists '("Library changed on disk")))
+              (dolist (file (excalimacs--library-files))
+                (unless (equal file path)
+                  (dolist (item (append (excalimacs--file-library-items file) nil))
+                    (puthash (gethash "id" item) t imported))))
+              (when (> (hash-table-count imported) 0)
+                (let* ((library (json-parse-string contents :object-type 'hash-table))
+                       (items (gethash "libraryItems" library)))
+                  (puthash "libraryItems"
+                           (vconcat (cl-remove-if (lambda (item)
+                                                    (gethash (gethash "id" item) imported))
+                                                  (append items nil)))
+                           library)
+                  (setq contents (json-serialize library))))
+              (make-directory (file-name-directory path) t)
+              (unless (equal previous contents)
+                (excalimacs--atomic-write path (encode-coding-string contents 'utf-8)))
+              (excalimacs--json-reply 200 `(("hash" . ,(excalimacs--hash contents))))))))
+      (file-already-exists
+       (excalimacs--json-reply 409 `(("error" . ,(error-message-string err)))))
+      (error
+       (excalimacs--json-reply 400 `(("error" . ,(error-message-string err))))))))
 
 (defun excalimacs--atomic-write (path bytes)
   "Atomically replace PATH with unibyte BYTES."
@@ -130,13 +306,10 @@ BASE-HASH is nil only when creating a new file."
     (insert (json-serialize object)))
   (httpd-send-header t "application/json" status :Cache-Control "no-store"))
 
-(defun excalimacs--session (request)
-  "Return drawing path for the token in REQUEST, or nil."
-  (gethash (cadr (assoc "X-Editor-Token" request)) excalimacs--sessions))
-
 (defun excalimacs--session-path (request)
   "Return the drawing path authorized by REQUEST."
-  (let ((session (excalimacs--session request)))
+  (let ((session (gethash (cadr (assoc "X-Editor-Token" request))
+                          excalimacs--sessions)))
     (if (stringp session) session (plist-get session :path))))
 
 (defun excalimacs--allowed-origin-p (request)
@@ -424,8 +597,7 @@ When PATH is non-nil, it is accepted for targeted refresh callers."
           (excalimacs--json-reply 409 '(("error" . "Drawing changed before preview arrived"))))
          (t
           (let ((png (cadr (assoc "Content" request))))
-            (unless (and (stringp png)
-                         (string-prefix-p (unibyte-string 137 80 78 71 13 10 26 10) png))
+            (unless (excalimacs--png-p png)
               (error "Invalid PNG"))
             (excalimacs--atomic-write (concat path ".png") png)
             (excalimacs--refresh-org-images (concat path ".png"))
@@ -476,7 +648,7 @@ otherwise reuses the interrupted response buffer, corrupting both replies."
   (let* ((port (excalimacs--start))
          (token (excalimacs--token))
          (url (format "http://127.0.0.1:%s/?token=%s" port token)))
-    (puthash token (list :path path) excalimacs--sessions)
+    (puthash token path excalimacs--sessions)
     (browse-url url)
     url))
 

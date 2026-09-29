@@ -29,6 +29,13 @@ In an Org buffer, run `M-x excalimacs-create-drawing`. It inserts an `excalidraw
 
 If using `org-excalidraw`, disable its file watcher and old file opener while trying Excalimacs. They still launch the Excalidraw PWA and invoke excalirender.
 
+Library items you create in Excalidraw are saved in `library.excalidrawlib`
+under `user-emacs-directory/excalimacs/`. Libraries added from the Excalidraw
+website are saved as separate `.excalidrawlib` files in that directory. You
+can also copy library files there yourself. The open editor checks the directory
+every two seconds, so removing a file removes its items from Excalidraw.
+Set `excalimacs-library-directory` to use another directory.
+
 ## Saving
 
 Each browser view has a separate random token bound to one file. Edits autosave after a short pause; `Cmd+S` or `Ctrl+S` saves immediately. Emacs checks the file hash before replacing it and rejects stale saves.
