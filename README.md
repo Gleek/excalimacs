@@ -87,6 +87,10 @@ Searchable text is updated from the drawing when you save it.
 
 ### Use the PNG
 
+`Alt+Shift+O` opens the drawing in the installed Excalidraw app on macOS,
+regardless of your default image viewer. PNG drawings are opened as temporary
+`.excalidraw` copies; edits in that app do not update the original PNG.
+
 Your saved `.excalidraw.png` is already an image you can share or use in other
 applications. Excalidraw generates it as part of saving, without a separate
 PNG rendering tool. Keep that original file if you want to edit the drawing

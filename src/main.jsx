@@ -323,7 +323,7 @@ function App() {
     try {
       await save();
       if (conflictRef.current || currentRef.current !== savedRef.current) return;
-      await api("POST", {}, "/api/open-in-app");
+      await api("POST", { text: savedRef.current }, "/api/open-in-app");
     } catch (failure) {
       setError(failure.message);
     }

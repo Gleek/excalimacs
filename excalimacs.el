@@ -442,8 +442,21 @@ BASE-HASH is nil only when creating a new file."
          ((not (excalimacs--allowed-origin-p request))
           (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
          (t
+          (when (string-suffix-p ".png" path)
+            (let* ((data (json-parse-string
+                          (decode-coding-string (cadr (assoc "Content" request)) 'utf-8)))
+                   (text (gethash "text" data)))
+              (unless text
+                (error "Refresh the editor tab to load the updated app opener"))
+              (unless (excalimacs--valid-drawing-p text)
+                (error "Invalid drawing"))
+              (setq path (make-temp-file "excalimacs-app-" nil ".excalidraw"))
+              (excalimacs--atomic-write path text)))
           (let ((program (if (eq system-type 'darwin) "open" "xdg-open")))
-            (unless (zerop (call-process program nil nil nil path))
+            (unless (zerop (apply #'call-process program nil nil nil
+                                 (if (eq system-type 'darwin)
+                                     (list "-a" "Excalidraw" path)
+                                   (list path))))
               (error "Could not open drawing with %s" program)))
           (excalimacs--json-reply 200 '(("opened" . t)))))
       (error

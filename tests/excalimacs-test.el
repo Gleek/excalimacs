@@ -97,12 +97,18 @@
 
 (ert-deftest excalimacs-open-in-app-uses-authorized-session ()
   (let ((excalimacs--sessions (make-hash-table :test #'equal))
-        (path "/tmp/drawing with spaces.excalidraw")
+        (path "/tmp/drawing with spaces.excalidraw.png")
         (allowed t)
         (exit-status 0)
-        status calls)
+        status calls written)
     (puthash "test" path excalimacs--sessions)
     (cl-letf (((symbol-function 'excalimacs--allowed-origin-p) (lambda (_) allowed))
+              ((symbol-function 'make-temp-file)
+               (lambda (_prefix _dir suffix)
+                 (should (equal suffix ".excalidraw"))
+                 "/tmp/excalimacs-app-test.excalidraw"))
+              ((symbol-function 'excalimacs--atomic-write)
+               (lambda (_path text) (setq written text)))
               ((symbol-function 'call-process)
                (lambda (&rest args) (push args calls) exit-status))
               ((symbol-function 'httpd-send-header)
@@ -115,14 +121,22 @@
         (setq allowed (nth 2 case))
         (httpd/api/open-in-app nil "/api/open-in-app" nil
                               `((,(car case) "/api/open-in-app" "HTTP/1.1")
-                                ("X-Editor-Token" ,(nth 1 case))))
+                                ("X-Editor-Token" ,(nth 1 case))
+                                ("Content" ,(json-serialize
+                                             `((text . ,excalimacs--empty-drawing))))))
         (should (= status (nth 3 case))))
-      (should (equal calls (list (list (if (eq system-type 'darwin) "open" "xdg-open")
-                                      nil nil nil path))))
+      (should (equal calls
+                     (list (append (list (if (eq system-type 'darwin) "open" "xdg-open")
+                                         nil nil nil)
+                                   (when (eq system-type 'darwin) '("-a" "Excalidraw"))
+                                   (list "/tmp/excalimacs-app-test.excalidraw")))))
+      (should (equal written excalimacs--empty-drawing))
       (setq exit-status 1)
       (httpd/api/open-in-app nil "/api/open-in-app" nil
-                            '(("POST" "/api/open-in-app" "HTTP/1.1")
-                              ("X-Editor-Token" "test")))
+                            `(("POST" "/api/open-in-app" "HTTP/1.1")
+                              ("X-Editor-Token" "test")
+                              ("Content" ,(json-serialize
+                                           `((text . ,excalimacs--empty-drawing))))))
       (should (= status 400)))))
 
 (ert-deftest excalimacs-save-unicode-http-body ()
