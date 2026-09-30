@@ -13,7 +13,6 @@
 (require 'subr-x)
 (require 'url)
 (require 'org-id)
-(require 'tabulated-list)
 
 (defgroup excalimacs nil "Local Excalidraw editor." :group 'applications)
 
@@ -65,16 +64,6 @@ After changing this option on a running server, restart Excalimacs with
   "IPv4 address advertised by network open actions.
 Nil selects a non-loopback, non-tunnel network interface automatically."
   :type '(choice (const :tag "Automatic" nil) string))
-
-(defcustom excalimacs-debug t
-  "Log HTTP traffic and drawing bridge activity in diagnostics.
-Logs contain request paths, status codes and byte counts, without tokens
-or drawing contents.  Only the latest 300 entries are retained."
-  :type 'boolean)
-
-(defvar excalimacs--logs nil)
-(defvar excalimacs--diagnostics-timer nil)
-(defvar excalimacs--request nil)
 
 (defvar excalimacs--sessions (make-hash-table :test #'equal))
 (defvar excalimacs--owns-server nil)
@@ -783,70 +772,6 @@ BASE-HASH is nil only when creating a new file."
       (error
        (excalimacs--json-reply 400 `(("error" . ,(error-message-string err))))))))
 
-(defun excalimacs--diagnostics-schedule-refresh ()
-  "Refresh an open diagnostics buffer after pending events settle."
-  (when (and (get-buffer "*Excalimacs Diagnostics*")
-             (not excalimacs--diagnostics-timer))
-    (setq excalimacs--diagnostics-timer
-          (run-at-time
-           0.2 nil
-           (lambda ()
-             (setq excalimacs--diagnostics-timer nil)
-             (when-let* ((buffer (get-buffer "*Excalimacs Diagnostics*")))
-               (with-current-buffer buffer
-                 (excalimacs--diagnostics-refresh))))))))
-
-(defun excalimacs--log (format-string &rest args)
-  "Record a bounded diagnostic event using FORMAT-STRING and ARGS."
-  (when excalimacs-debug
-    (push (concat (format-time-string "%H:%M:%S ")
-                  (apply #'format format-string args)) excalimacs--logs)
-    (when (> (length excalimacs--logs) 300)
-      (setcdr (nthcdr 299 excalimacs--logs) nil))
-    (excalimacs--diagnostics-schedule-refresh)))
-
-(defun excalimacs--httpd-log (log item)
-  "Capture simple-httpd ITEM safely while Excalimacs owns the server."
-  (if (not excalimacs--owns-server)
-      (funcall log item)
-    (pcase (car item)
-      ((or 'connection 'close 'start 'stop)
-       (excalimacs--log "HTTP %s %s" (car item) (cadr item)))
-      ((or 'error 'hard-error)
-       ;; Error objects can contain request bodies, URLs or credentials.
-       (excalimacs--log "HTTP error %s" (if (numberp (cadr item)) (cadr item) "internal"))))))
-
-(defun excalimacs--log-response (send proc mime status &rest headers)
-  "Log the status and byte count of a response sent by SEND."
-  (let ((bytes (httpd--buffer-size))
-        (request excalimacs--request))
-    (prog1 (apply send proc mime status headers)
-      (when request
-        (excalimacs--log "HTTP -> %s %s | %s | %s bytes"
-                        (caar request) (car (split-string (cadar request) "[?#]"))
-                        status bytes)))))
-
-(advice-add 'httpd--log :around #'excalimacs--httpd-log)
-(advice-add 'httpd-send-header :around #'excalimacs--log-response)
-
-(defun excalimacs--isolate-request (handle &rest args)
-  "Run HANDLE with ARGS outside any pending HTTP response buffer.
-Sending large assets can run another request's timer.  simple-httpd
-otherwise reuses the interrupted response buffer, corrupting both replies."
-  (if excalimacs--owns-server
-      (let* ((excalimacs--request (cadr args))
-             (body (cadr (assoc "Content" excalimacs--request)))
-             (proc (car args)))
-        (excalimacs--log "HTTP <- %s %s | %s | %s bytes"
-                        (caar excalimacs--request)
-                        (car (split-string (or (cadar excalimacs--request) "") "[?#]"))
-                        (if (processp proc) (car (process-contact proc)) "internal")
-                        (if (stringp body) (string-bytes body) 0))
-        (with-temp-buffer (apply handle args)))
-    (apply handle args)))
-
-(advice-add 'httpd--handle-request :around #'excalimacs--isolate-request)
-
 (defun excalimacs--start (&optional network)
   "Start the HTTP server, allowing LAN connections when NETWORK is non-nil."
   (when (and network (not excalimacs-allow-remote))
@@ -885,6 +810,25 @@ otherwise reuses the interrupted response buffer, corrupting both replies."
                          (not (memq (aref address 0) '(0 127 169))))
                return (mapconcat #'number-to-string (seq-take address 4) "."))
       (user-error "Set excalimacs-network-address to your computer's LAN IPv4 address")))
+
+(defun excalimacs--remote-session-p (session)
+  "Return non-nil if SESSION grants access through a remote URL."
+  (and (listp session) (plist-get session :origin)
+       (not (string-prefix-p "http://127.0.0.1:" (plist-get session :origin)))))
+
+(defun excalimacs--remote-enabled-p ()
+  "Return non-nil if remote access is permitted or already listening."
+  (or excalimacs-allow-remote
+      (and excalimacs--owns-server (httpd-running-p)
+           (equal httpd-host "0.0.0.0"))))
+
+(defun excalimacs--clear-drawing (path)
+  "Revoke every session for drawing PATH, keeping the file."
+  (let (tokens)
+    (maphash (lambda (token session)
+               (when (equal path (if (stringp session) session (plist-get session :path)))
+                 (push token tokens))) excalimacs--sessions)
+    (mapc #'excalimacs--revoke-session tokens)))
 
 (defun excalimacs--revoke-session (token)
   "Revoke TOKEN and restrict the server when no remote sessions remain."
@@ -1013,139 +957,7 @@ With a prefix argument, choose browser, copy-url, or qr-code."
   (excalimacs--log "Server stopped; all drawing access cleared")
   (excalimacs--diagnostics-schedule-refresh))
 
-(define-derived-mode excalimacs-diagnostics-mode tabulated-list-mode "Excalimacs"
-  "Inspect drawing sessions and control the Excalimacs server.
-Press g to refresh or d to revoke the session at point."
-  (setq tabulated-list-format [("Drawing" 28 t) ("Access" 14 t)
-                               ("Sessions" 8 t) ("" 8 nil) ("Path" 0 t)]
-        tabulated-list-use-header-line nil
-        tabulated-list-padding 2
-        tabulated-list-sort-key '("Drawing" . nil)
-        revert-buffer-function #'excalimacs--diagnostics-refresh)
-  (tabulated-list-init-header)
-  (setq header-line-format '(:eval (excalimacs--diagnostics-header))))
-
-(define-key excalimacs-diagnostics-mode-map (kbd "d") #'excalimacs-diagnostics-revoke)
-
-(defun excalimacs--remote-session-p (session)
-  "Return non-nil if SESSION grants access through a remote URL."
-  (and (listp session) (plist-get session :origin)
-       (not (string-prefix-p "http://127.0.0.1:" (plist-get session :origin)))))
-
-(defun excalimacs--remote-enabled-p ()
-  "Return non-nil if remote access is permitted or already listening."
-  (or excalimacs-allow-remote
-      (and excalimacs--owns-server (httpd-running-p)
-           (equal httpd-host "0.0.0.0"))))
-
-(defun excalimacs--header-toggle (enabled command)
-  "Make an ENABLED status clickable to run COMMAND in this buffer."
-  (let ((map (make-mode-line-mouse-map 'mouse-1 command)))
-    (define-key map [header-line mouse-1] (lookup-key map [mode-line mouse-1]))
-    (propertize (if enabled "on" "off") 'face 'link 'mouse-face 'highlight
-                'help-echo "mouse-1: toggle" 'local-map map)))
-
-(defun excalimacs--diagnostics-header ()
-  "Return clickable remote and server status for the header line."
-  (list " Remote: "
-        (excalimacs--header-toggle (excalimacs--remote-enabled-p)
-                                  #'excalimacs-diagnostics-toggle-remote)
-        ", Server: "
-        (excalimacs--header-toggle (and excalimacs--owns-server (httpd-running-p))
-                                  #'excalimacs-diagnostics-toggle-server)))
-
-(defun excalimacs--diagnostics-refresh (&rest _ignored)
-  "Refresh the drawings table and bounded traffic log."
-  (setq tabulated-list-entries
-        (let ((drawings (make-hash-table :test #'equal)) rows)
-          (maphash
-           (lambda (_token session)
-             (let* ((path (if (stringp session) session (plist-get session :path)))
-                    (counts (or (gethash path drawings) (cons 0 0))))
-               (if (excalimacs--remote-session-p session)
-                   (cl-incf (cdr counts)) (cl-incf (car counts)))
-               (puthash path counts drawings)))
-           excalimacs--sessions)
-          (maphash
-           (lambda (path counts)
-             (push (list path
-                         (vector (propertize
-                                  (truncate-string-to-width (file-name-nondirectory path)
-                                                            27 nil nil "...")
-                                  'help-echo (file-name-nondirectory path))
-                                 (cond ((zerop (car counts)) "Remote")
-                                       ((zerop (cdr counts)) "Local")
-                                       (t "Local + Remote"))
-                                 (number-to-string (+ (car counts) (cdr counts)))
-                                 (list "Clear" 'action #'excalimacs--diagnostics-clear-button
-                                       'excalimacs-path path 'follow-link t)
-                                 (abbreviate-file-name path))) rows))
-           drawings)
-          rows))
-  (tabulated-list-print t)
-  (let ((inhibit-read-only t))
-    (save-excursion
-      (goto-char (point-max))
-      (insert "\nLogs\n-------\n")
-      (cond ((not excalimacs-debug) (insert "Logging disabled (excalimacs-debug).\n"))
-            (excalimacs--logs (insert (mapconcat #'identity (reverse excalimacs--logs) "\n") "\n"))
-            (t (insert "No activity recorded yet.\n")))
-      (insert "\ng: refresh    d: clear drawing access    q: close\n")))
-  (force-mode-line-update))
-
-(defun excalimacs--diagnostics-clear-button (button)
-  "Clear all sessions for the drawing identified by BUTTON."
-  (excalimacs--clear-drawing (button-get button 'excalimacs-path))
-  (excalimacs--diagnostics-refresh))
-
-(defun excalimacs--clear-drawing (path)
-  "Revoke every session for drawing PATH, keeping the file."
-  (let (tokens)
-    (maphash (lambda (token session)
-               (when (equal path (if (stringp session) session (plist-get session :path)))
-                 (push token tokens))) excalimacs--sessions)
-    (mapc #'excalimacs--revoke-session tokens)))
-
-(defun excalimacs-diagnostics-toggle-server ()
-  "Toggle the server, starting on loopback or stopping all sessions."
-  (interactive)
-  (if (and excalimacs--owns-server (httpd-running-p))
-      (excalimacs-stop)
-    (excalimacs--start))
-  (excalimacs--diagnostics-refresh))
-
-(defun excalimacs-diagnostics-toggle-remote ()
-  "Toggle remote access, revoking remote sessions when disabling it.
-Enabling permits subsequent QR or copy-url actions to start LAN listening."
-  (interactive)
-  (setq excalimacs-allow-remote (not (excalimacs--remote-enabled-p)))
-  (unless excalimacs-allow-remote
-    (let (tokens)
-      (maphash (lambda (token session)
-                 (when (excalimacs--remote-session-p session) (push token tokens)))
-               excalimacs--sessions)
-      (mapc #'excalimacs--revoke-session tokens)
-      ;; Restrict an existing LAN listener even if no remote grants remain.
-      (excalimacs--revoke-session nil)))
-  (excalimacs--log "Remote access %s" (if excalimacs-allow-remote "enabled" "disabled"))
-  (excalimacs--diagnostics-refresh))
-
-(defun excalimacs-diagnostics-revoke ()
-  "Clear all access to the drawing at point, keeping its file."
-  (interactive)
-  (let ((path (tabulated-list-get-id)))
-    (unless path (user-error "No drawing on this row"))
-    (excalimacs--clear-drawing path)
-    (excalimacs--diagnostics-refresh)))
-
-;;;###autoload
-(defun excalimacs-diagnostics ()
-  "Show drawing sessions, paths, and server controls."
-  (interactive)
-  (with-current-buffer (get-buffer-create "*Excalimacs Diagnostics*")
-    (excalimacs-diagnostics-mode)
-    (excalimacs--diagnostics-refresh)
-    (pop-to-buffer (current-buffer))))
+(require 'excalimacs-diagnostics)
 
 (provide 'excalimacs)
 ;;; excalimacs.el ends here
