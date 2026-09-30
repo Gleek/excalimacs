@@ -53,7 +53,7 @@ The value `ask' prompts before deleting; nil keeps the file."
 (defvar excalimacs-block-map)
 
 (defcustom excalimacs-templates
-  '((org-mode :begin "#+begin_excalidraw :file {file}" :end "#+end_excalidraw")
+  '((org-mode :begin "#+begin_excalimacs :file {file}" :end "#+end_excalimacs")
     (markdown-mode :begin "<!-- excalidraw: {file}" :end "-->")
     (agent-shell-mode :begin "@{file}" :text nil)
     (prog-mode :comment t)
@@ -400,6 +400,33 @@ BASE-HASH is nil only when creating a new file."
       (error
        (excalimacs--json-reply 400 `(("error" . ,(error-message-string err))))))))
 
+(httpd-servlet api/open-link application/json (_path _query request)
+  (let ((path (excalimacs--session-path request)))
+    (condition-case err
+        (cond
+         ((not path) (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         ((not (equal (caar request) "POST"))
+          (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
+         ((not (excalimacs--allowed-origin-p request))
+          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         (t
+          (let* ((data (json-parse-string
+                        (decode-coding-string (cadr (assoc "Content" request)) 'utf-8)))
+                 (link (gethash "link" data)))
+            (unless (and (stringp link) (not (string-empty-p link)))
+              (error "Invalid link"))
+            (setq link (string-trim link))
+            ;; Link handlers need the user's buffer, not the HTTP response buffer.
+            (with-current-buffer (window-buffer (selected-window))
+              (let ((default-directory (file-name-directory path)))
+                (org-link-open-from-string
+                 (if (string-prefix-p "[[" link)
+                     link
+                   (concat "[[" (org-link-escape link) "]]"))))))
+          (excalimacs--json-reply 200 '(("opened" . t)))))
+      (error
+       (excalimacs--json-reply 400 `(("error" . ,(error-message-string err))))))))
+
 (defun excalimacs--template ()
   "Return the template for the current major mode."
   (let ((entry (seq-find (lambda (item) (eq (car item) major-mode)) excalimacs-templates)))
@@ -630,6 +657,10 @@ BASE-HASH is nil only when creating a new file."
                     (delete-region body-begin (point))
                     (goto-char body-begin)
                     (dolist (line lines)
+                      ;; Colon-prefixed lines are Org fixed-width text, which
+                      ;; hides links from Org's parser and org-roam.
+                      (when (derived-mode-p 'org-mode)
+                        (setq line (string-remove-prefix ": " line)))
                       (insert prefix line suffix "\n")))))))
           (when (bound-and-true-p excalimacs-minor-mode)
             (excalimacs-refresh))

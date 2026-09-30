@@ -67,8 +67,14 @@ async function loadDrawing() {
 function searchableText(text) {
   const seen = new Set();
   return JSON.parse(text).elements
-    .filter((element) => !element.isDeleted && element.type === "text" && element.text)
-    .flatMap((element) => element.text.split("\n"))
+    .filter((element) => !element.isDeleted)
+    .flatMap((element) => [
+      ...(element.type === "text" && element.text ? element.text.split("\n") : []),
+      ...(element.link ? [element.link.trim().startsWith("[[")
+        ? element.link.trim()
+        : `[[${element.link.trim().replace(/(\\*)($|[\[\]])/g, (_, slashes, bracket) =>
+          slashes + slashes + (bracket ? `\\${bracket}` : ""))}]]`] : []),
+    ])
     .map((line) => line.trim())
     .filter((line) => line && !seen.has(line) && seen.add(line))
     .map((line) => `: ${line}`);
@@ -324,6 +330,13 @@ function App() {
     }
   }, [save]);
 
+  const openLink = useCallback((element, event) => {
+    event.preventDefault();
+    if (!element.link) return;
+    void api("POST", { link: element.link }, "/api/open-link")
+      .catch((failure) => setError(`Could not open link: ${failure.message}`));
+  }, []);
+
   useEffect(() => {
     const keydown = (event) => {
       if (event.altKey && event.shiftKey && event.code === "KeyO") {
@@ -393,7 +406,7 @@ function App() {
     {importError && <aside role="alert">{importError}</aside>}
     <Excalidraw excalidrawAPI={setExcalidrawAPI} libraryReturnUrl={libraryReturnUrl}
       initialData={{ ...document.drawing, libraryItems }}
-      onLibraryChange={libraryChanged} onChange={changed} theme={theme}
+      onLibraryChange={libraryChanged} onChange={changed} onLinkOpen={openLink} theme={theme}
       onThemeChange={setThemePreference}
       UIOptions={{ canvasActions: { toggleTheme: true } }}>
       <MainMenu>

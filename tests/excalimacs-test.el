@@ -183,7 +183,7 @@
               (excalimacs-create-drawing "example")))
           (should (equal opened (expand-file-name "example.excalidraw.png" directory)))
           (should (equal (buffer-string)
-                         (format "#+begin_excalidraw :file %S\n#+end_excalidraw" opened)))
+                         (format "#+begin_excalimacs :file %S\n#+end_excalimacs" opened)))
           (should-not (file-exists-p opened)))
       (delete-directory directory t))))
 
@@ -196,7 +196,7 @@
           (with-temp-file file (set-buffer-multibyte nil) (insert png))
           (with-temp-buffer
             (org-mode)
-            (insert (format "Before\n#+begin_excalidraw :file %S\n#+end_excalidraw\nAfter" file))
+            (insert (format "Before\n#+begin_excalimacs :file %S\n#+end_excalimacs\nAfter" file))
             (excalimacs-minor-mode 1)
             (goto-char (point-min))
             (search-forward "After")
@@ -232,16 +232,16 @@
         (with-temp-buffer
           (setq buffer-file-name org-file)
           (org-mode)
-          (insert "Before\n#+begin_excalidraw :file drawing.excalidraw.png\nold text\n#+end_excalidraw\nAfter\n")
+          (insert "Before\n#+begin_excalimacs :file drawing.excalidraw.png\nold text\n#+end_excalimacs\nAfter\n")
           (excalimacs--replace-block-text drawing '("Authentication" "PostgreSQL"))
           (should (equal (buffer-string)
-                         "Before\n#+begin_excalidraw :file drawing.excalidraw.png\nAuthentication\nPostgreSQL\n#+end_excalidraw\nAfter\n")))
+                         "Before\n#+begin_excalimacs :file drawing.excalidraw.png\nAuthentication\nPostgreSQL\n#+end_excalimacs\nAfter\n")))
       (delete-directory directory t))))
 
 (ert-deftest excalimacs-templates-insert-in-any-supported-mode ()
   (let ((directory (make-temp-file "excalimacs-template-" t)))
     (unwind-protect
-        (dolist (case '((org-mode "#+begin_excalidraw :file " "#+end_excalidraw")
+        (dolist (case '((org-mode "#+begin_excalimacs :file " "#+end_excalimacs")
                         (markdown-mode "<!-- excalidraw: " "-->")
                         (emacs-lisp-mode "; excalidraw: " "; /excalidraw")
                         (agent-shell-mode "@" nil)
@@ -387,6 +387,78 @@
                                  (expand-file-name "example.excalidraw.png"
                                                    directory)))))
       (delete-directory directory t))))
+
+(ert-deftest excalimacs-element-links-use-org-and-authorized-session ()
+  (let ((excalimacs--sessions (make-hash-table :test #'equal))
+        (allowed t)
+        status opened)
+    (puthash "test" "/tmp/drawings/example.excalidraw.png" excalimacs--sessions)
+    (cl-letf (((symbol-function 'excalimacs--allowed-origin-p) (lambda (_) allowed))
+              ((symbol-function 'org-link-open-from-string)
+               (lambda (link &optional _arg)
+                 (push (list link default-directory (current-buffer)) opened)))
+              ((symbol-function 'httpd-send-header)
+               (lambda (_proc _mime code &rest _headers)
+                 (setq status code httpd--header-sent t))))
+      (dolist (case '(("GET" "test" t 405)
+                      ("POST" "unknown" t 403)
+                      ("POST" "test" nil 403)))
+        (setq allowed (nth 2 case))
+        (httpd/api/open-link nil "/api/open-link" nil
+                            `((,(car case) "/api/open-link" "HTTP/1.1")
+                              ("X-Editor-Token" ,(nth 1 case))))
+        (should (= status (nth 3 case))))
+      (should-not opened)
+      (setq allowed t)
+      (dolist (link '("id:abc" "file:notes.org::Heading" "agent-shell:session"
+                      "pdf:document.pdf#page=2" "https://example.com"))
+        (httpd/api/open-link nil "/api/open-link" nil
+                            `(("POST" "/api/open-link" "HTTP/1.1")
+                              ("X-Editor-Token" "test")
+                              ("Content" ,(json-serialize `((link . ,link))))))
+        (should (= status 200))
+        (should (equal (caar opened) (concat "[[" link "]]")))
+        (should (equal (cadar opened) "/tmp/drawings/"))
+        (should (eq (nth 2 (car opened)) (window-buffer (selected-window)))))
+      (httpd/api/open-link nil "/api/open-link" nil
+                          '(("POST" "/api/open-link" "HTTP/1.1")
+                            ("X-Editor-Token" "test") ("Content" "{\"link\":null}")))
+      (should (= status 400)))))
+
+(ert-deftest excalimacs-element-links-accept-org-brackets ()
+  (let ((excalimacs--sessions (make-hash-table :test #'equal))
+        (org-link-parameters (copy-tree org-link-parameters))
+        status opened)
+    (puthash "test" "/tmp/drawing.excalidraw.png" excalimacs--sessions)
+    (org-link-set-parameters "excalimacs-test"
+                             :follow (lambda (path _arg) (setq opened path)))
+    (cl-letf (((symbol-function 'excalimacs--allowed-origin-p) (lambda (_) t))
+              ((symbol-function 'httpd-send-header)
+               (lambda (_proc _mime code &rest _headers)
+                 (setq status code httpd--header-sent t))))
+      (dolist (link '("excalimacs-test:hello"
+                      "[[excalimacs-test:hello]]"
+                      " [[excalimacs-test:hello][A description]] "))
+        (setq opened nil)
+        (httpd/api/open-link nil "/api/open-link" nil
+                            `(("POST" "/api/open-link" "HTTP/1.1")
+                              ("X-Editor-Token" "test")
+                              ("Content" ,(json-serialize `((link . ,link))))))
+        (should (= status 200))
+        (should (equal opened "hello"))))))
+
+(ert-deftest excalimacs-org-projection-exposes-links ()
+  (dolist (name '("excalimacs"))
+    (with-temp-buffer
+      (org-mode)
+      (insert (format "#+begin_%s :file /tmp/example.excalidraw.png\n: old\n#+end_%s\n"
+                      name name))
+      (excalimacs--replace-block-text "/tmp/example.excalidraw.png"
+                                    '(": Label" ": [[id:abc][Note]]"))
+      (should (string-match-p "\nLabel\n\\[\\[id:abc\\]\\[Note\\]\\]\n" (buffer-string)))
+      (should (equal (org-element-map (org-element-parse-buffer) 'link
+                       (lambda (link) (org-element-property :raw-link link)))
+                     '("id:abc"))))))
 
 (provide 'excalimacs-test)
 ;;; excalimacs-test.el ends here

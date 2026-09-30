@@ -48,6 +48,24 @@ can also copy library files there yourself. The open editor checks the directory
 every two seconds, so removing a file removes its items from Excalidraw.
 Set `excalimacs-library-directory` to use another directory.
 
+## Element links
+
+Select an element and use `Ctrl+K` / `Cmd+K` to attach or edit its link.
+Enter a raw target such as `id:...`, `file:notes.org::Heading`,
+`agent-shell:...`, `pdf:...`, or `https://example.com`. Clicking its link
+opens it through Org's link resolver in Emacs, including custom registered
+link types. Relative file paths are resolved from the drawing's directory.
+The element's label is ordinary Excalidraw text and is edited separately.
+You can also paste `[[target]]` or `[[target][description]]` into the link
+field; Org opens the target and ignores the description. Normal Org link
+confirmations still apply.
+Templates with searchable text include element link targets as well as text
+labels, including links attached to shapes and images. Raw targets are
+exported as Org bracket links. Org templates use `#+begin_excalimacs` /
+`#+end_excalimacs` with ordinary text inside, so Org recognizes the links
+and org-roam can index links to its nodes. Disable the minor mode to follow
+these links directly.
+
 ## Saving
 
 Each browser view has a separate random token bound to one file. Edits autosave after a short pause; `Cmd+S` or `Ctrl+S` saves immediately. Emacs checks the file hash before replacing it and rejects stale saves.
