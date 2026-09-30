@@ -22,8 +22,11 @@
   :type 'directory)
 
 (defcustom excalimacs-directory "~/org-excalidraw"
-  "Directory used by `excalimacs-create-drawing'."
-  :type 'directory)
+  "Directory or function used by `excalimacs-create-drawing'.
+A function is called without arguments in the buffer creating the drawing
+and must return a directory string.  Relative directories are resolved
+against that buffer's `default-directory'."
+  :type '(choice directory function))
 
 (defcustom excalimacs-library-directory
   (expand-file-name "excalimacs" user-emacs-directory)
@@ -774,11 +777,18 @@ otherwise reuses the interrupted response buffer, corrupting both replies."
          (filename (cond ((string-empty-p name) (concat (org-id-uuid) ".excalidraw.png"))
                          ((string-suffix-p ".excalidraw.png" name) name)
                          (t (concat (file-name-sans-extension name) ".excalidraw.png"))))
-         (path (expand-file-name filename excalimacs-directory)))
+         (directory (if (functionp excalimacs-directory)
+                        (funcall excalimacs-directory)
+                      excalimacs-directory))
+         (path (progn
+                 (unless (stringp directory)
+                   (user-error "Excalimacs directory must be a string, got: %S" directory))
+                 (setq directory (expand-file-name directory))
+                 (expand-file-name filename directory))))
     (unless (and (equal filename (file-name-nondirectory filename))
                  (not (member name '("." ".."))))
       (user-error "Drawing name must be a filename"))
-    (make-directory excalimacs-directory t)
+    (make-directory directory t)
     (when (file-exists-p path) (user-error "Drawing already exists: %s" path))
     (let* ((begin (plist-get template :begin))
            (placeholder (string-match "{file}" begin)))

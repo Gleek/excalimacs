@@ -187,6 +187,39 @@
           (should-not (file-exists-p opened)))
       (delete-directory directory t))))
 
+(ert-deftest excalimacs-create-resolves-directory-function-in-source-buffer ()
+  (let ((directory (make-temp-file "excalimacs-context-" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (setq major-mode 'agent-shell-mode
+                default-directory (file-name-as-directory directory))
+          (let* ((source (current-buffer))
+                 (calls 0)
+                 (excalimacs-directory
+                  (lambda ()
+                    (should (eq (current-buffer) source))
+                    (should (eq major-mode 'agent-shell-mode))
+                    (cl-incf calls)
+                    ".agent-shell/diagrams/"))
+                 (expected (expand-file-name
+                            ".agent-shell/diagrams/example.excalidraw.png"
+                            directory)))
+            (cl-letf (((symbol-function 'excalimacs-open)
+                       (lambda (path) (should (equal path expected)))))
+              (excalimacs-create-drawing "example"))
+            (should (= calls 1))
+            (should (file-directory-p (file-name-directory expected)))
+            (should (equal (buffer-string) (format "@%S" expected)))))
+      (delete-directory directory t))))
+
+(ert-deftest excalimacs-create-rejects-invalid-directory-function-result ()
+  (with-temp-buffer
+    (let ((excalimacs-directory (lambda () nil)))
+      (cl-letf (((symbol-function 'excalimacs-open)
+                 (lambda (_) (ert-fail "Should not open a drawing"))))
+        (should-error (excalimacs-create-drawing "example") :type 'user-error))
+      (should (equal (buffer-string) "")))))
+
 (ert-deftest excalimacs-org-delete-drawing-removes-block-and-optional-file ()
   (let* ((directory (make-temp-file "excalimacs-delete-" t))
          (file (expand-file-name "drawing.excalidraw.png" directory))
