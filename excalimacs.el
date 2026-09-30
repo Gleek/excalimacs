@@ -13,6 +13,7 @@
 (require 'subr-x)
 (require 'url)
 (require 'org-id)
+(require 'tabulated-list)
 
 (defgroup excalimacs nil "Local Excalidraw editor." :group 'applications)
 
@@ -47,6 +48,33 @@ The value `ask' prompts before deleting; nil keeps the file."
   :type '(choice (const :tag "Ask" ask)
                  (const :tag "Delete automatically" t)
                  (const :tag "Keep file" nil)))
+
+(defcustom excalimacs-open-action 'browser
+  "Default action for opening drawings.
+With a prefix argument, choose an action instead."
+  :type '(choice (const browser) (const copy-url) (const qr-code)))
+
+(defcustom excalimacs-allow-remote nil
+  "Allow QR and copied URLs to enable LAN access.
+The server still starts on loopback until a remote open action is used.
+After changing this option on a running server, restart Excalimacs with
+`excalimacs-stop' to apply the new policy."
+  :type 'boolean)
+
+(defcustom excalimacs-network-address nil
+  "IPv4 address advertised by network open actions.
+Nil selects a non-loopback, non-tunnel network interface automatically."
+  :type '(choice (const :tag "Automatic" nil) string))
+
+(defcustom excalimacs-debug t
+  "Log HTTP traffic and drawing bridge activity in diagnostics.
+Logs contain request paths, status codes and byte counts, without tokens
+or drawing contents.  Only the latest 300 entries are retained."
+  :type 'boolean)
+
+(defvar excalimacs--logs nil)
+(defvar excalimacs--diagnostics-timer nil)
+(defvar excalimacs--request nil)
 
 (defvar excalimacs--sessions (make-hash-table :test #'equal))
 (defvar excalimacs--owns-server nil)
@@ -330,10 +358,28 @@ BASE-HASH is nil only when creating a new file."
     (if (stringp session) session (plist-get session :path))))
 
 (defun excalimacs--allowed-origin-p (request)
-  "Return non-nil if REQUEST came from this local server."
+  "Return non-nil if REQUEST uses an authorized server origin."
   (let ((origin (cadr (assoc "Origin" request)))
+        (session (or (gethash (cadr (assoc "X-Editor-Token" request))
+                             excalimacs--sessions)
+                     (excalimacs--library-import-session request)))
         (port (process-contact httpd--server :service)))
-    (or (not origin) (equal origin (format "http://127.0.0.1:%s" port)))))
+    (or (not origin)
+        (equal origin (if (stringp session)
+                          (format "http://127.0.0.1:%s" port)
+                        (plist-get session :origin))))))
+
+(httpd-servlet api/library-token application/json (_path _query request)
+  (cond
+   ((not (excalimacs--session-path request))
+    (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+   ((not (equal (caar request) "GET"))
+    (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
+   (t
+    (excalimacs--json-reply
+     200 `(("token" . ,(secure-hash 'sha256
+                                  (concat "excalimacs-library:"
+                                          (cadr (assoc "X-Editor-Token" request))))))))))
 
 (httpd-servlet api/drawing application/json (_path _query request)
   (let ((path (excalimacs--session-path request))
@@ -550,7 +596,11 @@ BASE-HASH is nil only when creating a new file."
   (when event (mouse-set-point event))
   (let ((overlay (excalimacs--drawing-at (point))))
     (unless overlay (user-error "No Excalidraw drawing at point"))
-    (excalimacs-open (overlay-get overlay 'excalimacs-path))))
+    (excalimacs-open
+     (overlay-get overlay 'excalimacs-path)
+     (when current-prefix-arg
+       (intern (completing-read "Open action: "
+                                '("browser" "copy-url" "qr-code") nil t))))))
 
 (defun excalimacs--drawing-at (position)
   "Return the drawing overlay covering POSITION, if any."
@@ -720,38 +770,158 @@ BASE-HASH is nil only when creating a new file."
       (error
        (excalimacs--json-reply 400 `(("error" . ,(error-message-string err))))))))
 
+(defun excalimacs--diagnostics-schedule-refresh ()
+  "Refresh an open diagnostics buffer after pending events settle."
+  (when (and (get-buffer "*Excalimacs Diagnostics*")
+             (not excalimacs--diagnostics-timer))
+    (setq excalimacs--diagnostics-timer
+          (run-at-time
+           0.2 nil
+           (lambda ()
+             (setq excalimacs--diagnostics-timer nil)
+             (when-let* ((buffer (get-buffer "*Excalimacs Diagnostics*")))
+               (with-current-buffer buffer
+                 (excalimacs--diagnostics-refresh))))))))
+
+(defun excalimacs--log (format-string &rest args)
+  "Record a bounded diagnostic event using FORMAT-STRING and ARGS."
+  (when excalimacs-debug
+    (push (concat (format-time-string "%H:%M:%S ")
+                  (apply #'format format-string args)) excalimacs--logs)
+    (when (> (length excalimacs--logs) 300)
+      (setcdr (nthcdr 299 excalimacs--logs) nil))
+    (excalimacs--diagnostics-schedule-refresh)))
+
+(defun excalimacs--httpd-log (log item)
+  "Capture simple-httpd ITEM safely while Excalimacs owns the server."
+  (if (not excalimacs--owns-server)
+      (funcall log item)
+    (pcase (car item)
+      ((or 'connection 'close 'start 'stop)
+       (excalimacs--log "HTTP %s %s" (car item) (cadr item)))
+      ((or 'error 'hard-error)
+       ;; Error objects can contain request bodies, URLs or credentials.
+       (excalimacs--log "HTTP error %s" (if (numberp (cadr item)) (cadr item) "internal"))))))
+
+(defun excalimacs--log-response (send proc mime status &rest headers)
+  "Log the status and byte count of a response sent by SEND."
+  (let ((bytes (httpd--buffer-size))
+        (request excalimacs--request))
+    (prog1 (apply send proc mime status headers)
+      (when request
+        (excalimacs--log "HTTP -> %s %s | %s | %s bytes"
+                        (caar request) (car (split-string (cadar request) "[?#]"))
+                        status bytes)))))
+
+(advice-add 'httpd--log :around #'excalimacs--httpd-log)
+(advice-add 'httpd-send-header :around #'excalimacs--log-response)
+
 (defun excalimacs--isolate-request (handle &rest args)
   "Run HANDLE with ARGS outside any pending HTTP response buffer.
 Sending large assets can run another request's timer.  simple-httpd
 otherwise reuses the interrupted response buffer, corrupting both replies."
   (if excalimacs--owns-server
-      (with-temp-buffer (apply handle args))
+      (let* ((excalimacs--request (cadr args))
+             (body (cadr (assoc "Content" excalimacs--request)))
+             (proc (car args)))
+        (excalimacs--log "HTTP <- %s %s | %s | %s bytes"
+                        (caar excalimacs--request)
+                        (car (split-string (or (cadar excalimacs--request) "") "[?#]"))
+                        (if (processp proc) (car (process-contact proc)) "internal")
+                        (if (stringp body) (string-bytes body) 0))
+        (with-temp-buffer (apply handle args)))
     (apply handle args)))
 
 (advice-add 'httpd--handle-request :around #'excalimacs--isolate-request)
 
-(defun excalimacs--start ()
-  "Start a local Emacs HTTP server for Excalimacs."
+(defun excalimacs--start (&optional network)
+  "Start the HTTP server, allowing LAN connections when NETWORK is non-nil."
+  (when (and network (not excalimacs-allow-remote))
+    (user-error "Enable excalimacs-allow-remote to use remote open actions"))
   (unless (file-exists-p (expand-file-name "index.html" excalimacs-dist-directory))
     (error "Build Excalimacs first: npm run build"))
   (if (httpd-running-p)
       (unless (and excalimacs--owns-server
-                   (equal httpd-host "127.0.0.1")
+                   (member httpd-host '("127.0.0.1" "0.0.0.0"))
                    (equal (file-truename httpd-root)
                           (file-truename excalimacs-dist-directory)))
         (error "simple-httpd is already serving another site"))
-    (setq httpd-host "127.0.0.1"
+    (setq httpd-host (if network "0.0.0.0" "127.0.0.1")
           httpd-port 0
           httpd-root excalimacs-dist-directory
           httpd-listings nil)
+    (let ((httpd-log-buffer nil)) (httpd-start))
+    (setq excalimacs--owns-server t)
+    (excalimacs--log "Server started %s:%s" httpd-host (process-contact httpd--server :service))
+    (excalimacs--diagnostics-schedule-refresh))
+  (when (and network (equal httpd-host "127.0.0.1"))
+    ;; Preserve URLs and session authorizations when enabling LAN access.
+    (setq httpd-port (process-contact httpd--server :service)
+          httpd-host "0.0.0.0")
     (httpd-start)
-    (setq excalimacs--owns-server t))
+    (excalimacs--log "LAN listening enabled on port %s" httpd-port)
+    (excalimacs--diagnostics-schedule-refresh))
   (process-contact httpd--server :service))
 
+(defun excalimacs--network-address ()
+  "Return the configured or detected LAN IPv4 address."
+  (or excalimacs-network-address
+      (cl-loop for (name . address) in (network-interface-list)
+               when (and (= (length address) 5)
+                         (not (string-match-p "\\`\\(?:lo\\|utun\\|tun\\|docker\\|veth\\)" name))
+                         (not (memq (aref address 0) '(0 127 169))))
+               return (mapconcat #'number-to-string (seq-take address 4) "."))
+      (user-error "Set excalimacs-network-address to your computer's LAN IPv4 address")))
+
+(defun excalimacs--revoke-session (token)
+  "Revoke TOKEN and restrict the server when no remote sessions remain."
+  (when-let* ((session (gethash token excalimacs--sessions)))
+    (excalimacs--log "Drawing access cleared: %s"
+                    (if (stringp session) session (plist-get session :path))))
+  (remhash token excalimacs--sessions)
+  (excalimacs--diagnostics-schedule-refresh)
+  (when (and excalimacs--owns-server (httpd-running-p)
+             (equal httpd-host "0.0.0.0")
+             (not (cl-loop for session being the hash-values of excalimacs--sessions
+                           thereis (excalimacs--remote-session-p session))))
+    (setq httpd-port (process-contact httpd--server :service)
+          httpd-host "127.0.0.1")
+    (httpd-start)
+    (excalimacs--log "Server restricted to loopback on port %s" httpd-port)))
+
+(defun excalimacs--show-qr (url token)
+  "Display URL as a QR code, with a button to revoke TOKEN."
+  (unless (executable-find "qrencode")
+    (user-error "Install qrencode to display QR codes"))
+  (let ((png (with-temp-buffer
+               (set-buffer-multibyte nil)
+               (unless (zerop (call-process "qrencode" nil t nil
+                                           "-t" "PNG" "-s" "8" "-o" "-" url))
+                 (error "Could not generate QR code"))
+               (buffer-string)))
+        (buffer (get-buffer-create (format "*Excalimacs QR %s*" (substring token 0 8)))))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "Scan to edit this drawing on your device.\n\n")
+        (insert-image (create-image png 'png t))
+        (insert "\n\n" url "\n\nKeep this URL private. Access lasts until revoked or the server stops.\n\n")
+        (insert-text-button
+         "Revoke access" 'action
+         (lambda (_button)
+           (excalimacs--revoke-session token)
+           (message "Drawing access revoked")))
+        (special-mode)))
+    (pop-to-buffer buffer)))
+
 ;;;###autoload
-(defun excalimacs-open (path)
-  "Open Excalidraw file PATH in a private browser session."
-  (interactive "fDrawing: ")
+(defun excalimacs-open (path &optional action)
+  "Open drawing PATH using ACTION or `excalimacs-open-action'.
+With a prefix argument, choose browser, copy-url, or qr-code."
+  (interactive (list (read-file-name "Drawing: ")
+                     (when current-prefix-arg
+                       (intern (completing-read "Open action: "
+                                                '("browser" "copy-url" "qr-code") nil t)))))
   (setq path (file-truename path))
   (unless (or (and (string-suffix-p ".excalidraw" path)
                    (file-exists-p path)
@@ -760,12 +930,30 @@ otherwise reuses the interrupted response buffer, corrupting both replies."
                    (or (not (file-exists-p path))
                        (excalimacs--png-p (excalimacs--read-bytes path)))))
     (user-error "Not a valid Excalidraw drawing: %s" path))
-  (let* ((port (excalimacs--start))
-         (token (excalimacs--token))
-         (url (format "http://127.0.0.1:%s/?token=%s" port token)))
-    (puthash token path excalimacs--sessions)
-    (browse-url url)
-    url))
+  (let* ((action (or action excalimacs-open-action))
+         (network (memq action '(copy-url qr-code)))
+         (address (if network (excalimacs--network-address) "127.0.0.1")))
+    (unless (memq action '(browser copy-url qr-code))
+      (user-error "Unknown open action: %s" action))
+    (when (and network (not excalimacs-allow-remote))
+      (user-error "Enable excalimacs-allow-remote to use remote open actions"))
+    (when (and (eq action 'qr-code) (not (executable-find "qrencode")))
+      (user-error "Install qrencode to display QR codes"))
+    (let* ((port (excalimacs--start network))
+           (token (excalimacs--token))
+           (origin (format "http://%s:%s" address port))
+           (url (format "%s/?token=%s" origin token)))
+      (puthash token (list :path path :origin origin) excalimacs--sessions)
+      (excalimacs--log "Drawing opened (%s): %s" action path)
+      (excalimacs--diagnostics-schedule-refresh)
+      (condition-case err
+          (pcase action
+            ('browser (browse-url url))
+            ('copy-url (kill-new url) (message "Drawing URL copied"))
+            ('qr-code (excalimacs--show-qr url token)))
+        (error (excalimacs--revoke-session token)
+               (signal (car err) (cdr err))))
+      url)))
 
 ;;;###autoload
 (defun excalimacs-create-drawing (name)
@@ -808,7 +996,143 @@ otherwise reuses the interrupted response buffer, corrupting both replies."
   (when (and excalimacs--owns-server (httpd-running-p))
     (httpd-stop))
   (setq excalimacs--owns-server nil)
-  (clrhash excalimacs--sessions))
+  (clrhash excalimacs--sessions)
+  (excalimacs--log "Server stopped; all drawing access cleared")
+  (excalimacs--diagnostics-schedule-refresh))
+
+(define-derived-mode excalimacs-diagnostics-mode tabulated-list-mode "Excalimacs"
+  "Inspect drawing sessions and control the Excalimacs server.
+Press g to refresh or d to revoke the session at point."
+  (setq tabulated-list-format [("Drawing" 28 t) ("Access" 14 t)
+                               ("Sessions" 8 t) ("" 8 nil) ("Path" 0 t)]
+        tabulated-list-use-header-line nil
+        tabulated-list-padding 2
+        tabulated-list-sort-key '("Drawing" . nil)
+        revert-buffer-function #'excalimacs--diagnostics-refresh)
+  (tabulated-list-init-header)
+  (setq header-line-format '(:eval (excalimacs--diagnostics-header))))
+
+(define-key excalimacs-diagnostics-mode-map (kbd "d") #'excalimacs-diagnostics-revoke)
+
+(defun excalimacs--remote-session-p (session)
+  "Return non-nil if SESSION grants access through a remote URL."
+  (and (listp session) (plist-get session :origin)
+       (not (string-prefix-p "http://127.0.0.1:" (plist-get session :origin)))))
+
+(defun excalimacs--remote-enabled-p ()
+  "Return non-nil if remote access is permitted or already listening."
+  (or excalimacs-allow-remote
+      (and excalimacs--owns-server (httpd-running-p)
+           (equal httpd-host "0.0.0.0"))))
+
+(defun excalimacs--header-toggle (enabled command)
+  "Make an ENABLED status clickable to run COMMAND in this buffer."
+  (let ((map (make-mode-line-mouse-map 'mouse-1 command)))
+    (define-key map [header-line mouse-1] (lookup-key map [mode-line mouse-1]))
+    (propertize (if enabled "on" "off") 'face 'link 'mouse-face 'highlight
+                'help-echo "mouse-1: toggle" 'local-map map)))
+
+(defun excalimacs--diagnostics-header ()
+  "Return clickable remote and server status for the header line."
+  (list " Remote: "
+        (excalimacs--header-toggle (excalimacs--remote-enabled-p)
+                                  #'excalimacs-diagnostics-toggle-remote)
+        ", Server: "
+        (excalimacs--header-toggle (and excalimacs--owns-server (httpd-running-p))
+                                  #'excalimacs-diagnostics-toggle-server)))
+
+(defun excalimacs--diagnostics-refresh (&rest _ignored)
+  "Refresh the drawings table and bounded traffic log."
+  (setq tabulated-list-entries
+        (let ((drawings (make-hash-table :test #'equal)) rows)
+          (maphash
+           (lambda (_token session)
+             (let* ((path (if (stringp session) session (plist-get session :path)))
+                    (counts (or (gethash path drawings) (cons 0 0))))
+               (if (excalimacs--remote-session-p session)
+                   (cl-incf (cdr counts)) (cl-incf (car counts)))
+               (puthash path counts drawings)))
+           excalimacs--sessions)
+          (maphash
+           (lambda (path counts)
+             (push (list path
+                         (vector (propertize
+                                  (truncate-string-to-width (file-name-nondirectory path)
+                                                            27 nil nil "...")
+                                  'help-echo (file-name-nondirectory path))
+                                 (cond ((zerop (car counts)) "Remote")
+                                       ((zerop (cdr counts)) "Local")
+                                       (t "Local + Remote"))
+                                 (number-to-string (+ (car counts) (cdr counts)))
+                                 (list "Clear" 'action #'excalimacs--diagnostics-clear-button
+                                       'excalimacs-path path 'follow-link t)
+                                 (abbreviate-file-name path))) rows))
+           drawings)
+          rows))
+  (tabulated-list-print t)
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char (point-max))
+      (insert "\nLogs\n-------\n")
+      (cond ((not excalimacs-debug) (insert "Logging disabled (excalimacs-debug).\n"))
+            (excalimacs--logs (insert (mapconcat #'identity (reverse excalimacs--logs) "\n") "\n"))
+            (t (insert "No activity recorded yet.\n")))
+      (insert "\ng: refresh    d: clear drawing access    q: close\n")))
+  (force-mode-line-update))
+
+(defun excalimacs--diagnostics-clear-button (button)
+  "Clear all sessions for the drawing identified by BUTTON."
+  (excalimacs--clear-drawing (button-get button 'excalimacs-path))
+  (excalimacs--diagnostics-refresh))
+
+(defun excalimacs--clear-drawing (path)
+  "Revoke every session for drawing PATH, keeping the file."
+  (let (tokens)
+    (maphash (lambda (token session)
+               (when (equal path (if (stringp session) session (plist-get session :path)))
+                 (push token tokens))) excalimacs--sessions)
+    (mapc #'excalimacs--revoke-session tokens)))
+
+(defun excalimacs-diagnostics-toggle-server ()
+  "Toggle the server, starting on loopback or stopping all sessions."
+  (interactive)
+  (if (and excalimacs--owns-server (httpd-running-p))
+      (excalimacs-stop)
+    (excalimacs--start))
+  (excalimacs--diagnostics-refresh))
+
+(defun excalimacs-diagnostics-toggle-remote ()
+  "Toggle remote access, revoking remote sessions when disabling it.
+Enabling permits subsequent QR or copy-url actions to start LAN listening."
+  (interactive)
+  (setq excalimacs-allow-remote (not (excalimacs--remote-enabled-p)))
+  (unless excalimacs-allow-remote
+    (let (tokens)
+      (maphash (lambda (token session)
+                 (when (excalimacs--remote-session-p session) (push token tokens)))
+               excalimacs--sessions)
+      (mapc #'excalimacs--revoke-session tokens)
+      ;; Restrict an existing LAN listener even if no remote grants remain.
+      (excalimacs--revoke-session nil)))
+  (excalimacs--log "Remote access %s" (if excalimacs-allow-remote "enabled" "disabled"))
+  (excalimacs--diagnostics-refresh))
+
+(defun excalimacs-diagnostics-revoke ()
+  "Clear all access to the drawing at point, keeping its file."
+  (interactive)
+  (let ((path (tabulated-list-get-id)))
+    (unless path (user-error "No drawing on this row"))
+    (excalimacs--clear-drawing path)
+    (excalimacs--diagnostics-refresh)))
+
+;;;###autoload
+(defun excalimacs-diagnostics ()
+  "Show drawing sessions, paths, and server controls."
+  (interactive)
+  (with-current-buffer (get-buffer-create "*Excalimacs Diagnostics*")
+    (excalimacs-diagnostics-mode)
+    (excalimacs--diagnostics-refresh)
+    (pop-to-buffer (current-buffer))))
 
 (provide 'excalimacs)
 ;;; excalimacs.el ends here

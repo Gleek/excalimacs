@@ -4,13 +4,12 @@
 
 ## Excalidraw, inside your Emacs workflow
 
-Create a diagram from your notes or code, edit it in Excalidraw in your browser,
-and see the result in your Emacs buffer. Open several drawings at once, search
-for the words inside them, and follow links from a diagram back to your notes.
+Create diagrams from your notes or code in Excalidraw, with previews in Emacs.
 
-Each new drawing is a single `.excalidraw.png` file. It works as an ordinary
-image, but also contains the editable drawing, so you can come back and change
-it later.
+- Open several drawings at once, with changes saved automatically.
+- Search drawing text and follow links back to your notes.
+- Keep each drawing in one editable `.excalidraw.png` file.
+- Draw on a phone or tablet via QR code, and manage access and logs in Emacs.
 
 ## Get started
 
@@ -68,6 +67,12 @@ Edits save after a short pause. `Ctrl+S` or `Cmd+S` saves immediately.
 A dot in the browser tab title means a save is still pending. If the file has
 changed elsewhere, Excalimacs rejects the conflicting save and offers an
 unsaved copy to download.
+
+### Open on a phone or tablet
+
+Enable remote access in `M-x excalimacs-diagnostics`, then use `C-u RET` on a drawing to choose QR code or Copy URL for a device on the same network.
+QR codes require `qrencode`; keep shared URLs private because LAN HTTP is unencrypted.
+The diagnostics buffer lists drawings, lets you clear access or toggle the server, and shows live logs (`excalimacs-debug` controls logging).
 
 ### Find text inside a diagram
 

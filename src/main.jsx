@@ -110,9 +110,8 @@ function App() {
 
   useEffect(() => {
     if (!token) return;
-    crypto.subtle.digest("SHA-256", new TextEncoder().encode(`excalimacs-library:${token}`))
-      .then((digest) => {
-        const scoped = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    api("GET", null, "/api/library-token")
+      .then(({ token: scoped }) => {
         localStorage.setItem(`excalimacs-return:${scoped}`, token);
         setLibraryReturnUrl(`${location.origin}${location.pathname}?libraryToken=${scoped}`);
       }).catch((failure) => setLibraryError(`Library link could not be prepared: ${failure.message}`));
@@ -405,6 +404,7 @@ function App() {
     {libraryError && <aside role="alert">{libraryError}</aside>}
     {importError && <aside role="alert">{importError}</aside>}
     <Excalidraw excalidrawAPI={setExcalidrawAPI} libraryReturnUrl={libraryReturnUrl}
+      handleKeyboardGlobally
       initialData={{ ...document.drawing, libraryItems }}
       onLibraryChange={libraryChanged} onChange={changed} onLinkOpen={openLink} theme={theme}
       onThemeChange={setThemePreference}
