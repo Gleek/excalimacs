@@ -6,6 +6,7 @@
 
 Create diagrams from your notes or code in Excalidraw, with previews in Emacs.
 
+- Work in any major mode, including Org, Markdown, agent-shell, and code.
 - Open several drawings at once, with changes saved automatically.
 - Search drawing text and follow links back to your notes.
 - Keep each drawing in one editable `.excalidraw.png` file.
@@ -70,7 +71,7 @@ unsaved copy to download.
 
 ### Open on a phone or tablet
 
-Enable remote access in `M-x excalimacs-diagnostics`, then use `C-u RET` on a drawing to choose QR code or Copy URL for a device on the same network.
+Enable remote access in `M-x excalimacs-diagnostics` or set `excalimacs-allow-remote` to `t`, then use `C-u RET` on a drawing to choose QR code or Copy URL for a device on the same network.
 QR codes require `qrencode`; keep shared URLs private because LAN HTTP is unencrypted.
 The diagnostics buffer lists drawings, lets you clear access or toggle the server, and shows live logs (`excalimacs-debug` controls logging).
 
@@ -130,6 +131,7 @@ Run `M-x customize-group RET excalimacs RET`, or set these in your configuration
 | Option | What it controls | Default |
 | --- | --- | --- |
 | `excalimacs-directory` | Where new drawings are saved | `~/org-excalidraw` |
+| `excalimacs-allow-remote` | Enable remote actions by default when set to `t`; LAN listening starts when you use QR or Copy URL | `nil` |
 | `excalimacs-preview-width` | Maximum preview width in pixels | `320` |
 | `excalimacs-delete-file` | Whether removing a drawing also deletes its file | `ask` (`t` to delete, `nil` to keep) |
 | `excalimacs-library-directory` | Where Excalidraw library files are stored | `excalimacs/` under `user-emacs-directory` |
@@ -197,6 +199,42 @@ If you're trying it alongside `org-excalidraw`, disable that package's file
 watcher and old file opener so they don't also launch the Excalidraw PWA or
 invoke excalirender.
 
+## Comparison with other packages
+
+Comparison as of **September 30, 2026**, based on my understanding of each
+package's documentation and source. “No” means no built-in integration.
+This compares the original `wdavew/org-excalidraw`, not my fork.
+
+| Feature | org-draw | Original org-excalidraw | Excalimacs |
+| --- | --- | --- | --- |
+| Drawing editor | tldraw | Excalidraw PWA | Bundled Excalidraw |
+| Editing interface | Browser, local or remote | Installed PWA; documented for Chromium | Browser, local or remote |
+| Modes supported | Org | Org | Org, Markdown, agent-shell, code, and other major modes |
+| Inline previews in Org | Yes, PNG | Yes, SVG | Yes, PNG |
+| Search diagram text from Emacs | No text projection | No text projection | Yes, in text-enabled templates |
+| Search diagram text with ripgrep | No text projection | No text projection | Yes, in text-enabled templates |
+| Follow Org links from diagram elements | No Emacs bridge | No Emacs bridge | Yes, including custom link types |
+| Single editable image file | Yes, PNG with embedded tldraw snapshot | No; drawing JSON plus generated SVG | Yes, PNG with embedded Excalidraw scene |
+| Preview generation | tldraw exports PNG directly | External `excalidraw_export` tool | Excalidraw exports PNG directly |
+| Separate renderer required | No | Yes | No |
+| Saving to Emacs | Click **Done** to submit | Save in PWA; file watcher updates SVG | Autosave, plus `Ctrl/Cmd+S` |
+| Multiple drawing sessions | Session-specific URLs; receiver also supports a queue | Delegated to PWA; no package-managed isolation | Separate sessions bound to drawing files |
+| Reject saves after external file changes | No file revision check found | No package-level check | Yes, file hash checks |
+| Phone/tablet drawing over LAN | Yes | No built-in remote workflow | Yes |
+| QR code opening | No built-in QR action found | No | Yes, requires `qrencode` |
+| Remote access controls | Optional device pairing | Not applicable | Per-drawing access tokens and revocation |
+| Server/access management UI | Setup buffer and server controls | No server | Diagnostics, access controls, live logs |
+| PWA installation required | No | Yes, documented setup | No |
+| External setup dependencies | No separate renderer or PWA | PWA, exporter and fonts | `simple-httpd`; optional `qrencode` |
+| Emacs package license | GPL-3.0-or-later | MIT | GPLv3 |
+
+Sources: [org-draw documentation](https://github.com/larrasket/org-draw),
+[browser implementation](https://github.com/larrasket/org-draw/blob/master/web/canvas.html),
+and [Emacs implementation](https://github.com/larrasket/org-draw/blob/master/org-draw.el);
+[original org-excalidraw documentation](https://github.com/wdavew/org-excalidraw)
+and [source](https://github.com/wdavew/org-excalidraw/blob/main/org-excalidraw.el).
+Excalimacs entries describe the implementation in this repository.
+
 ## Where it could go
 
 There is room for deeper integration between Excalidraw and Emacs. Element
@@ -205,6 +243,9 @@ to explore include:
 
 - An xwidget editor, so drawing and writing can happen within Emacs.
 - Richer org-roam integration for creating links and navigating backlinks.
+- Elisp drawing APIs for creating and editing diagrams programmatically.
+- Native collaboration so humans and LLM agents can work on a drawing together.
+- Custom Excalidraw plugins written in Elisp through the Emacs bridge.
 
 These are possibilities, not features available today. Editing currently
 happens in a browser, and live collaboration is not connected.
