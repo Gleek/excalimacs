@@ -2,11 +2,19 @@
 
 <img src="src/assets/excalimacs.svg" alt="Excalimacs logo" width="180">
 
-Excalidraw editing in Emacs buffers. New drawings are single `.excalidraw.png` files: Excalidraw's complete editable scene is embedded in the PNG metadata. Org, Markdown, and programming-mode templates keep a generated plain-text projection so tools such as ripgrep can find text in a drawing. No Node server runs while editing.
+## Excalidraw, inside your Emacs workflow
 
-## Install with Elpaca
+Create a diagram from your notes or code, edit it in Excalidraw in your browser,
+and see the result in your Emacs buffer. Open several drawings at once, search
+for the words inside them, and follow links from a diagram back to your notes.
 
-Tested with Emacs 30. The browser app is bundled, so Node.js is not needed to use Excalimacs:
+Each new drawing is a single `.excalidraw.png` file. It works as an ordinary
+image, but also contains the editable drawing, so you can come back and change
+it later.
+
+## Get started
+
+Tested with Emacs 30. Install with Elpaca:
 
 ```elisp
 (use-package excalimacs
@@ -18,7 +26,17 @@ Tested with Emacs 30. The browser app is bundled, so Node.js is not needed to us
          . excalimacs-minor-mode))
 ```
 
-Elpaca installs the declared `simple-httpd` dependency. For a local checkout, add this directory to `load-path`, install `simple-httpd`, and configure Emacs:
+The browser editor is bundled. You don't need Node.js to use the package;
+Elpaca installs the `simple-httpd` dependency for you.
+
+To create your first drawing:
+
+1. Open a buffer and run `M-x excalimacs-create-drawing`.
+2. Enter a name, or leave it blank for an automatically generated name.
+3. Draw in the browser. Your changes save automatically and the preview updates in Emacs.
+
+For a local checkout, install `simple-httpd`, add the checkout to `load-path`,
+and use:
 
 ```elisp
 (require 'excalimacs)
@@ -26,55 +44,165 @@ Elpaca installs the declared `simple-httpd` dependency. For a local checkout, ad
 (add-hook 'org-mode-hook #'excalimacs-minor-mode)
 ```
 
-Run `M-x excalimacs-create-drawing` in any buffer. It inserts a template at point and opens the browser editor. The first render creates its `.excalidraw.png`; later saves atomically replace that file and update searchable text in templates that include it. Org, Markdown, and programming modes include text. The agent-shell template is `@path`, which agent-shell sends as an image attachment when supported. A plain-text template covers other modes. Excalimacs finds the saved template again when a buffer reopens and does not edit submitted agent-shell history.
+`excalimacs-directory` also accepts a function called without arguments in
+the buffer creating the drawing. It must return a directory string; relative
+paths use that buffer's `default-directory`. For example:
 
-`excalimacs-minor-mode` controls display and deletion. With it enabled, a drawing template is shown as the PNG and protected from editing. In agent-shell it replaces only `@...excalidraw.png` mentions, leaving the shell prompt intact. Press `RET` or click the image to open it. Delete at its start or Backspace just after it removes the template; other keys retain their major-mode bindings. `excalimacs-delete-file` controls whether the PNG is also deleted: `ask` (default), `t`, or `nil`. Disable the minor mode to see and edit the full template as plain text. The creation command works with the minor mode off. Run `M-x excalimacs-open` to edit an existing PNG directly. Legacy `.excalidraw` files can still be opened.
+```elisp
+(setq excalimacs-directory
+      (lambda ()
+        (if (derived-mode-p 'agent-shell-mode)
+            ".agent-shell/diagrams/"
+          "~/org-excalidraw")))
+```
 
-Customize `excalimacs-templates` to add or override formats. An entry has a major-mode symbol and a property list. `:begin` must contain `{file}`; `:end` closes a multi-line template. Omit `:text` or set it to `t` to include searchable text, or set it to `nil` for a path-only template. For example:
+## Everyday usage
+
+### Open and edit drawings
+
+Press `RET` on a preview or click it to open the editor. You can keep several
+drawings open in separate browser tabs or windows. Use `M-x excalimacs-open`
+to open an existing drawing directly, including older `.excalidraw` files.
+
+Edits save after a short pause. `Ctrl+S` or `Cmd+S` saves immediately.
+A dot in the browser tab title means a save is still pending. If the file has
+changed elsewhere, Excalimacs rejects the conflicting save and offers an
+unsaved copy to download.
+
+### Find text inside a diagram
+
+Words written in your diagram are also stored as plain text in the buffer.
+You can find them with Emacs search or tools such as ripgrep, just as you
+would find text in your notes or code. Link targets are included too.
+
+The minor mode displays an image over this text. Toggle
+`M-x excalimacs-minor-mode` off to see or edit the underlying drawing block.
+Searchable text is updated from the drawing when you save it.
+
+### Use the PNG
+
+Your saved `.excalidraw.png` is already an image you can share or use in other
+applications. Excalidraw generates it as part of saving, without a separate
+PNG rendering tool. Keep that original file if you want to edit the drawing
+again later.
+
+### Link drawings to your notes (or anywhere)
+
+Select an element and press `Ctrl+K` or `Cmd+K` to attach a link. Anything you
+can link to in Org, you can link to from inside Excalimacs: notes, files,
+headings, websites, or custom Org link types. Clicking the link opens it
+through Emacs. Normal Org link confirmations still apply.
+
+In Org buffers, these links are also included in the searchable text, so
+org-roam can index links to its nodes.
+
+### Remove a drawing
+
+Press Delete at the start of a preview or Backspace just after it to remove
+its block from the buffer. By default, Excalimacs asks whether to delete the
+drawing file too.
+
+## Use it where you work
+
+Excalimacs is a minor mode, so it can sit alongside the major mode you already
+use. It includes drawing formats for:
+
+- **Org:** diagrams alongside your notes, with searchable text and Org links.
+- **Markdown:** diagrams with their searchable text stored in an HTML comment.
+- **Code:** diagrams and searchable text stored using the language's comment syntax.
+- **agent-shell:** create drawings on the fly and send them to your agents.
+- **Anywhere else:** enable the minor mode in another major mode using a hook; see
+  [Adding other modes](#adding-other-modes) below.
+
+Other modes use a plain-text drawing block by default. You can add a custom
+format through `excalimacs-templates`. The creation command also works when
+the minor mode is off; enable it when you want inline previews.
+
+## Options
+
+Run `M-x customize-group RET excalimacs RET`, or set these in your configuration:
+
+| Option | What it controls | Default |
+| --- | --- | --- |
+| `excalimacs-directory` | Where new drawings are saved | `~/org-excalidraw` |
+| `excalimacs-preview-width` | Maximum preview width in pixels | `320` |
+| `excalimacs-delete-file` | Whether removing a drawing also deletes its file | `ask` (`t` to delete, `nil` to keep) |
+| `excalimacs-library-directory` | Where Excalidraw library files are stored | `excalimacs/` under `user-emacs-directory` |
+| `excalimacs-templates` | How drawings are inserted in each major mode | Org, Markdown, code, agent-shell, and plain text |
+
+### Libraries
+
+Library items you create are saved in `library.excalidrawlib` in the library
+directory. Libraries added from the Excalidraw website are saved there as
+separate files. You can also copy `.excalidrawlib` files into that directory.
+The editor checks it every two seconds, including for removed libraries.
+
+### Adding other modes
+
+Add a hook to show drawings in any other major mode:
+
+```elisp
+(add-hook 'my-mode-hook #'excalimacs-minor-mode)
+```
+
+The plain-text drawing format works by default. To give that mode its own
+format, customize `excalimacs-templates` as described below.
+
+### Custom drawing formats
+
+For example, to add a format for another major mode:
 
 ```elisp
 (add-to-list 'excalimacs-templates
              '(my-mode :begin "DRAW {file}" :end "END" :text t))
 ```
 
-Use `:text-prefix` and `:text-suffix` to wrap each generated text line. Use `:comment t` to generate a template from a programming mode's `comment-start` and `comment-end`. Modes without a matching entry use the plain-text fallback.
+`:begin` must contain `{file}`. `:end` closes the block. Searchable text is
+included by default; set `:text nil` for a path-only format. Use `:text-prefix`
+and `:text-suffix` to wrap each text line, or `:comment t` to use the major
+mode's comment syntax.
 
-If using `org-excalidraw`, disable its file watcher and old file opener while trying Excalimacs. They still launch the Excalidraw PWA and invoke excalirender.
+## Why I built it
 
-Library items you create in Excalidraw are saved in `library.excalidrawlib`
-under `user-emacs-directory/excalimacs/`. Libraries added from the Excalidraw
-website are saved as separate `.excalidrawlib` files in that directory. You
-can also copy library files there yourself. The open editor checks the directory
-every two seconds, so removing a file removes its items from Excalidraw.
-Set `excalimacs-library-directory` to use another directory.
+I started with `org-excalidraw`, but it didn't work well for my workflow.
+I [forked it](https://github.com/Gleek/org-excalidraw), made a number of fixes,
+and switched PNG rendering to
+[excalirender](https://github.com/Gleek/excalirender). That improved things a
+lot, but two major frustrations remained:
 
-## Element links
+- **Working on multiple drawings could lose work.** The Excalidraw app's shared
+  browser storage made the workflow behave as if there were only one drawing.
+  When I opened two files at once, one drawing could overwrite the other. I
+  lost several drawings this way. This was the main reason I started Excalimacs.
+- **Rendered images didn't always match Excalidraw.** The separate renderer
+  wasn't always compatible with Excalidraw, leaving unexpected differences
+  between the drawing in the editor and the exported PNG.
 
-Select an element and use `Ctrl+K` / `Cmd+K` to attach or edit its link.
-Enter a raw target such as `id:...`, `file:notes.org::Heading`,
-`agent-shell:...`, `pdf:...`, or `https://example.com`. Clicking its link
-opens it through Org's link resolver in Emacs, including custom registered
-link types. Relative file paths are resolved from the drawing's directory.
-The element's label is ordinary Excalidraw text and is edited separately.
-You can also paste `[[target]]` or `[[target][description]]` into the link
-field; Org opens the target and ignores the description. Normal Org link
-confirmations still apply.
-Templates with searchable text include element link targets as well as text
-labels, including links attached to shapes and images. Raw targets are
-exported as Org bracket links. Org templates use `#+begin_excalimacs` /
-`#+end_excalimacs` with ordinary text inside, so Org recognizes the links
-and org-roam can index links to its nodes. Disable the minor mode to follow
-these links directly.
+`org-draw` was another good option, but it uses tldraw. I prefer Excalidraw's
+feature set, and licensing was a bigger concern: the
+[tldraw SDK has its own license](https://tldraw.dev/community/license), with
+license requirements for production use, while
+[Excalidraw is MIT-licensed](https://github.com/excalidraw/excalidraw/blob/master/LICENSE).
 
-## Saving
+Excalimacs gives each drawing its own editing session and uses Excalidraw itself
+to generate the PNG. It also makes diagram text searchable in your buffers and
+works as a minor mode alongside notes, code, Markdown, or agent-shell.
 
-Each browser view has a separate random token bound to one file. Edits autosave after a short pause; `Cmd+S` or `Ctrl+S` saves immediately. Emacs checks the file hash before replacing it and rejects stale saves.
+If you're trying it alongside `org-excalidraw`, disable that package's file
+watcher and old file opener so they don't also launch the Excalidraw PWA or
+invoke excalirender.
 
-After saving, the browser exports the same drawing revision to PNG with `exportEmbedScene` enabled and posts it to Emacs. Emacs accepts it only when the base hash matches the current file, updates matching Org blocks, and refreshes their images. A dot in the browser tab title means saving is unfinished. On a conflict, the editor offers an unsaved copy for download.
+## Where it could go
 
-The Open menu action is disabled for Emacs-hosted sessions; open another drawing from Emacs. Live collaboration is not connected.
+There is room for deeper integration between Excalidraw and Emacs. Element
+links and org-roam indexing already provide a starting point. Ideas I'd like
+to explore include:
 
-Use **Alt+Shift+O (Option+Shift+O on macOS)** or **Open in Excalidraw app** in the menu to save pending edits and open the same file using its system file association (`open` on macOS, `xdg-open` on Linux). Associate `.excalidraw` files with the Excalidraw app first. A save failure or conflict prevents opening. After saving changes in the external app, reload the wrapper to read them; it does not automatically follow external edits.
+- An xwidget editor, so drawing and writing can happen within Emacs.
+- Richer org-roam integration for creating links and navigating backlinks.
+
+These are possibilities, not features available today. Editing currently
+happens in a browser, and live collaboration is not connected.
 
 ## Development
 
@@ -95,7 +223,13 @@ Or use the npm wrapper: `EMACSLOADPATH=/path/to/simple-httpd: npm test`.
 
 These cover stale-save rejection, Unicode request handling, and Org link creation. Full browser-to-Emacs integration has been exercised manually.
 
-Excalidraw uses upstream's `next` development channel, with an exact version pinned in `package.json` and `package-lock.json`. It exports the command palette directly, so no bundle patch is needed.
+Excalimacs uses Excalidraw's `next` development release from npm, with an exact version pinned in `package.json` and `package-lock.json`. It exports the command palette directly, so no bundle patch is needed.
+
+`next` is an npm tag, not a GitHub branch. Upstream publishes it from its
+`release` branch. The version suffix identifies the source commit: for example,
+`0.18.0-1118751` corresponds to commit `1118751`. To see changes since that
+build, [compare it with master](https://github.com/excalidraw/excalidraw/compare/1118751...master).
+Check the current npm tags with `npm view @excalidraw/excalidraw dist-tags`.
 
 To upgrade to the latest published development build:
 
@@ -105,7 +239,7 @@ npm run upgrade:excalidraw
 
 This installs and pins the newest `next` version and rebuilds the browser app (including fonts). It stops if a command fails; it does not roll back dependency changes. Save pending edits before upgrading, then refresh the browser afterward. No Emacs restart is needed.
 
-Most upgrades should work without application changes, but development builds can change APIs or behavior. A passing build does not check every UI interaction: after upgrading, try editing text, saving, PNG previews, and the command palette. Upstream breaking changes may require application changes. The `next` channel is the latest published development build, which can lag behind the head of `master`.
+Most upgrades should work without application changes, but development builds can change APIs or behavior. A passing build does not check every UI interaction: after upgrading, try editing text, saving, PNG previews, and the command palette. Upstream breaking changes may require application changes. The `next` tag points to the latest published development build; its source can differ from `master`.
 
 ## License
 
