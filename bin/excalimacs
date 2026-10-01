@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Edit an Excalimacs drawing from the shell through the running Emacs.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: excalimacs [--immediate] OP DRAWING [IDS...]
+       excalimacs install-skill [SKILLS-DIR...]
+
+  scene   DRAWING           Print the drawing's elements as JSON, with versions.
+  add     DRAWING < JSON    Add an array of Excalidraw element skeletons.
+  update  DRAWING < JSON    Change elements: [{"id", "version", "x", "text", ...}].
+  mermaid DRAWING < MMD     Add a Mermaid diagram to the right of existing content.
+  delete  DRAWING ID[@VERSION]...  Delete elements and their labels.
+
+Skeletons follow Excalidraw's convertToExcalidrawElements format. Name your
+elements with a prefix of your own (e.g. "agent-api") so arrows can bind to
+them in later calls; a deleted id may be reused. Unsized arrows between two
+bound elements run from edge to edge:
+
+  [{"id": "agent-api", "type": "rectangle", "x": 0, "y": 0, "width": 160, "height": 70,
+    "label": {"text": "API"}, "backgroundColor": "#a5d8ff"},
+   {"type": "arrow", "start": {"id": "agent-api"}, "end": {"id": "agent-db"},
+    "label": {"text": "reads"}}]
+
+update takes x, y, width, height, text (a shape's or arrow's label), strokeColor,
+backgroundColor, fillStyle, strokeWidth, strokeStyle, roughness, opacity and link.
+Moving or resizing a shape re-routes the arrows bound to it.
+
+People and other agents edit the same drawing. Pass the "version" you read to
+update or delete, exactly as given (labelled elements use "5:3"). Only the properties you change are checked: if someone else
+changed one of them since that version, nothing is applied and the command
+exits 3, printing "changed" ({property: {was, now}}) and "current". Combine
+both intents and retry with current.version; no re-read is needed.
+
+Editor tabs draw each change the way a person would: shapes grow from their
+top-left corner, arrows extend from their start, labels are typed. The command
+returns once the drawing finishes and the change is saved, so make one change
+per call to let people follow along. Use --immediate to apply a change without
+drawing it. Coordinates are canvas pixels; y grows downward.
+EOF
+}
+
+# Copies the agent skill into each skills directory, defaulting to Claude Code and Codex.
+if [[ ${1:-} == install-skill ]]; then
+  shift
+  self=$(realpath "$0")
+  source=$(dirname "$self")/../skills/excalimacs/SKILL.md
+  (( $# )) || set -- "$HOME/.claude/skills" "$HOME/.codex/skills"
+  for dir in "$@"; do
+    mkdir -p "$dir/excalimacs"
+    # Agents may not have this script on PATH, so the skill names it absolutely.
+    escaped=${self//\\/\\\\}; escaped=${escaped//&/\\&}; escaped=${escaped//#/\\#}
+    sed "s#^<!-- excalimacs-path -->\$#If \`excalimacs\` is not on PATH, run it as \`$escaped\`.#" \
+        "$source" > "$dir/excalimacs/SKILL.md"
+    echo "Installed $dir/excalimacs/SKILL.md"
+  done
+  exit
+fi
+
+immediate=nil
+if [[ ${1:-} == --immediate ]]; then immediate=t; shift; fi
+[[ $# -ge 2 ]] || { usage; exit 2; }
+op=$1 drawing=$2
+shift 2
+if [[ ${1:-} == --immediate ]]; then immediate=t; shift; fi
+[[ -e $drawing || $drawing == *.excalidraw.png ]] || { echo "No drawing: $drawing" >&2; exit 2; }
+drawing=$(cd "$(dirname "$drawing")" && pwd)/$(basename "$drawing")
+
+request=$(mktemp) output=$(mktemp)
+trap 'rm -f "$request" "$output"' EXIT
+{
+  printf '%s\n%s\n' "$op" "$drawing"
+  case $op in
+    add|update|mermaid) cat ;;
+    delete) printf '%s\n' "$@" ;;
+  esac
+} > "$request"
+
+id=$(emacsclient --eval "(excalimacs-agent-submit \"$request\" $immediate)" | tr -d '"')
+# Operations queue behind each other's drawing, so allow about two minutes.
+for _ in $(seq 1200); do
+  case $(emacsclient --eval "(excalimacs-agent-result \"$id\" \"$output\")") in
+    nil) sleep 0.1 ;;
+    ok) cat "$output"; echo; exit 0 ;;
+    conflict) cat "$output"; echo; exit 3 ;;
+    *) cat "$output"; echo; exit 1 ;;
+  esac
+done
+emacsclient --eval "(excalimacs-agent-cancel \"$id\")" >/dev/null
+echo "Timed out waiting for an Excalimacs tab to apply $op; cancelled it" >&2
+exit 1

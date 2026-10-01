@@ -65,6 +65,22 @@ After changing this option on a running server, restart Excalimacs with
 Nil selects a non-loopback, non-tunnel network interface automatically."
   :type '(choice (const :tag "Automatic" nil) string))
 
+(defcustom excalimacs-agent-drawing-speed 500
+  "Speed in pixels per second at which editor tabs draw agent edits.
+Shapes grow from their corner and arrows extend along their path at this
+speed, as if drawn with a mouse."
+  :type 'number)
+
+(defcustom excalimacs-agent-typing-speed 20
+  "Characters per second at which editor tabs type agent labels and text."
+  :type 'number)
+
+(defcustom excalimacs-agent-drawing-limit 8
+  "Maximum seconds to draw one agent operation.
+Larger operations are drawn faster to fit.  The agent's command returns
+when the drawing finishes, so this also bounds how long it waits."
+  :type 'number)
+
 (defvar excalimacs--sessions (make-hash-table :test #'equal))
 (defvar excalimacs--owns-server nil)
 (defvar-local excalimacs--overlays nil)
@@ -115,6 +131,22 @@ More specific major modes take precedence over their parents."
 (defun excalimacs--hash-bytes (bytes)
   "Return the SHA-256 hash of unibyte BYTES."
   (secure-hash 'sha256 bytes))
+
+(defvar excalimacs--hash-cache (make-hash-table :test #'equal))
+(defvar excalimacs--sockets nil "Editor WebSockets as (PROCESS TOKEN TAB PATH).")
+(defvar excalimacs--agent-queue (make-hash-table :test #'equal))
+(defvar excalimacs--agent-results (make-hash-table :test #'equal))
+
+(defun excalimacs--file-hash (path)
+  "Return PATH's hash, or nil when it is missing, cached by mtime and size."
+  (when-let* ((attributes (file-attributes path)))
+    (let ((key (list (file-attribute-modification-time attributes)
+                     (file-attribute-size attributes)))
+          (cached (gethash path excalimacs--hash-cache)))
+      (if (equal (car cached) key)
+          (cdr cached)
+        (cdr (puthash path (cons key (excalimacs--hash-bytes (excalimacs--read-bytes path)))
+                      excalimacs--hash-cache))))))
 
 (defun excalimacs--png-p (bytes)
   "Return non-nil when BYTES starts with the PNG signature."
@@ -340,6 +372,16 @@ BASE-HASH is nil only when creating a new file."
     (insert (json-serialize object)))
   (httpd-send-header t "application/json" status :Cache-Control "no-store"))
 
+(defun excalimacs--revalidate-files (send proc mime status &rest headers)
+  "Call SEND with PROC, MIME, STATUS and HEADERS, marking files no-cache.
+Bundle names carry no content hash, so browsers must revalidate them."
+  (apply send proc mime status
+         (if (and excalimacs--owns-server (plist-member headers :ETag))
+             (append headers '(:Cache-Control "no-cache"))
+           headers)))
+
+(advice-add 'httpd-send-header :around #'excalimacs--revalidate-files)
+
 (defun excalimacs--session-path (request)
   "Return the drawing path authorized by REQUEST."
   (let ((session (gethash (cadr (assoc "X-Editor-Token" request))
@@ -370,12 +412,14 @@ BASE-HASH is nil only when creating a new file."
                                   (concat "excalimacs-library:"
                                           (cadr (assoc "X-Editor-Token" request))))))))))
 
-(httpd-servlet api/drawing application/json (_path _query request)
+(httpd-servlet api/drawing application/json (_path query request)
   (let ((path (excalimacs--session-path request))
         (method (caar request)))
     (condition-case err
         (cond
          ((not path) (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         ((and (equal method "GET") (assoc "hash" query))
+          (excalimacs--json-reply 200 `(("hash" . ,(or (excalimacs--file-hash path) :null)))))
          ((equal method "GET")
           (cond
            ((not (file-exists-p path))
@@ -406,6 +450,7 @@ BASE-HASH is nil only when creating a new file."
             (unless (excalimacs--png-p bytes) (error "Invalid PNG"))
             (let ((hash (excalimacs--write-png path bytes base)))
               (excalimacs--refresh-images path)
+              (excalimacs--notify path)
               (excalimacs--json-reply 200 `(("hash" . ,hash))))))
          (t
           (let* ((data (json-parse-string (decode-coding-string
@@ -415,7 +460,9 @@ BASE-HASH is nil only when creating a new file."
                  (text (gethash "text" data)))
             (unless (and (stringp base) (stringp text))
               (error "Invalid save request"))
-            (excalimacs--json-reply 200 `(("hash" . ,(excalimacs--save path base text)))))))
+            (let ((hash (excalimacs--save path base text)))
+              (excalimacs--notify path)
+              (excalimacs--json-reply 200 `(("hash" . ,hash)))))))
       (file-already-exists
        (excalimacs--json-reply 409 `(("error" . ,(error-message-string err)))))
       (error
@@ -502,6 +549,51 @@ BASE-HASH is nil only when creating a new file."
                       :text-suffix (if (string-empty-p end) "" (concat " " end)))))
           template)))))
 
+(defun excalimacs--text-p (template)
+  "Return non-nil when TEMPLATE keeps searchable text between its lines."
+  (and (plist-get template :end)
+       (or (not (plist-member template :text))
+           (plist-get template :text))))
+
+(defun excalimacs--body (template lines)
+  "Return LINES formatted as TEMPLATE's searchable text."
+  (if (excalimacs--text-p template)
+      (let ((prefix (or (plist-get template :text-prefix) ""))
+            (suffix (or (plist-get template :text-suffix) "")))
+        (mapconcat (lambda (line)
+                     ;; Colon-prefixed lines are Org fixed-width text, which
+                     ;; hides links from Org's parser and org-roam.
+                     (when (derived-mode-p 'org-mode)
+                       (setq line (string-remove-prefix ": " line)))
+                     (concat prefix line suffix "\n"))
+                   lines ""))
+    ""))
+
+(defun excalimacs--block-string (template path &optional lines)
+  "Return TEMPLATE filled in for PATH with searchable LINES."
+  (let ((begin (plist-get template :begin))
+        (end (plist-get template :end)))
+    (unless (string-match "{file}" begin)
+      (error "Excalimacs template :begin needs {file}"))
+    (concat (replace-match (prin1-to-string path) t t begin)
+            (when end (concat "\n" (excalimacs--body template lines) end)))))
+
+(defun excalimacs--block-lines (template begin end)
+  "Return the searchable text lines of TEMPLATE's block from BEGIN to END."
+  (when (excalimacs--text-p template)
+    (let ((prefix (or (plist-get template :text-prefix) ""))
+          (suffix (or (plist-get template :text-suffix) "")))
+      (save-excursion
+        (goto-char begin)
+        (forward-line 1)
+        (let ((body (point)))
+          (goto-char end)
+          (forward-line 0)
+          (when (< body (point))
+            (mapcar (lambda (line)
+                      (string-remove-suffix suffix (string-remove-prefix prefix line)))
+                    (split-string (buffer-substring-no-properties body (point)) "\n" t))))))))
+
 (defun excalimacs--template-regexp (begin)
   "Return a regexp matching BEGIN's file placeholder."
   (unless (and (stringp begin) (string-match "{file}" begin))
@@ -575,13 +667,18 @@ BASE-HASH is nil only when creating a new file."
       (when (bound-and-true-p excalimacs-minor-mode)
         (excalimacs-refresh)))))
 
-(defun excalimacs--refresh-after-change (_begin _end _old-length)
-  "Restore image overlays displaced by buffer edits."
+(defun excalimacs--refresh-after-change (begin end _old-length)
+  "Display inserted drawings and restore overlays displaced by edits."
   (when (and excalimacs-minor-mode
              (not excalimacs--refresh-timer)
-             (seq-some (lambda (overlay)
-                         (<= (overlay-end overlay) (overlay-start overlay)))
-                       excalimacs--overlays))
+             (or (seq-some (lambda (overlay)
+                             (<= (overlay-end overlay) (overlay-start overlay)))
+                           excalimacs--overlays)
+                 (when-let* ((template (excalimacs--template))
+                             (opening (plist-get template :begin)))
+                   (save-excursion
+                     (goto-char begin)
+                     (re-search-forward (excalimacs--template-regexp opening) end t)))))
     (setq excalimacs--refresh-timer
           (run-at-time 0 nil
                        (lambda (buffer)
@@ -672,6 +769,56 @@ BASE-HASH is nil only when creating a new file."
                 :filter (lambda (command)
                           (when (excalimacs--drawing-at (point)) command)))))
 
+(defun excalimacs--filter-buffer-substring (orig begin end &optional delete)
+  "Call ORIG on BEGIN, END and DELETE, tagging copied drawings with their path."
+  (let* ((from (min begin end))
+         (to (max begin end))
+         (template (excalimacs--template))
+         (drawings
+          (delq nil
+                (mapcar (lambda (overlay)
+                          (let ((start (overlay-start overlay))
+                                (stop (overlay-end overlay)))
+                            (when (and (overlay-get overlay 'excalimacs-path)
+                                       (<= from start) (<= stop to))
+                              (list (- start from) (- stop from)
+                                    (cons (overlay-get overlay 'excalimacs-path)
+                                          (excalimacs--block-lines template start stop))))))
+                        (overlays-in from to))))
+         (string (funcall orig begin end delete)))
+    ;; Another filter may have changed the text, which would shift offsets.
+    (when (= (length string) (- to from))
+      (pcase-dolist (`(,start ,stop ,drawing) drawings)
+        (put-text-property start stop 'excalimacs-drawing drawing string)))
+    string))
+
+(defun excalimacs--yank-transform (string)
+  "Rewrite drawings copied from any Excalimacs buffer in STRING for this buffer."
+  (let ((template (excalimacs--template))
+        (position 0)
+        parts)
+    (if (not (and template (text-property-not-all 0 (length string)
+                                                  'excalimacs-drawing nil string)))
+        string
+      (while (< position (length string))
+        (let ((next (next-single-property-change position 'excalimacs-drawing
+                                                 string (length string)))
+              (drawing (get-text-property position 'excalimacs-drawing string)))
+          (push (if (not drawing)
+                    (substring string position next)
+                  ;; Block templates only match when they own their lines.
+                  (let ((multiline (plist-get template :end)))
+                    (concat (when (and multiline (> position 0)
+                                       (/= (aref string (1- position)) ?\n))
+                              "\n")
+                            (excalimacs--block-string template (car drawing) (cdr drawing))
+                            (when (and multiline (< next (length string))
+                                       (/= (aref string next) ?\n))
+                              "\n"))))
+                parts)
+          (setq position next)))
+      (apply #'concat (nreverse parts)))))
+
 ;;;###autoload
 (define-minor-mode excalimacs-minor-mode
   "Display drawing templates as images in the current buffer."
@@ -680,9 +827,15 @@ BASE-HASH is nil only when creating a new file."
       (progn
         (add-hook 'after-save-hook #'excalimacs-refresh nil t)
         (add-hook 'after-change-functions #'excalimacs--refresh-after-change nil t)
+        (add-hook 'yank-transform-functions #'excalimacs--yank-transform nil t)
+        (add-function :around (local 'filter-buffer-substring-function)
+                      #'excalimacs--filter-buffer-substring)
         (excalimacs-refresh))
     (remove-hook 'after-save-hook #'excalimacs-refresh t)
     (remove-hook 'after-change-functions #'excalimacs--refresh-after-change t)
+    (remove-hook 'yank-transform-functions #'excalimacs--yank-transform t)
+    (remove-function (local 'filter-buffer-substring-function)
+                     #'excalimacs--filter-buffer-substring)
     (when excalimacs--refresh-timer
       (cancel-timer excalimacs--refresh-timer)
       (setq excalimacs--refresh-timer nil))
@@ -693,9 +846,7 @@ BASE-HASH is nil only when creating a new file."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when-let* ((template (excalimacs--template))
-                  ((or (not (plist-member template :text))
-                       (plist-get template :text)))
-                  ((plist-get template :end)))
+                  ((excalimacs--text-p template)))
         (let ((blocks (reverse (excalimacs--blocks path)))
               (was-modified (buffer-modified-p)))
           (dolist (block blocks)
@@ -704,19 +855,12 @@ BASE-HASH is nil only when creating a new file."
                 (save-excursion
                   (goto-char begin)
                   (forward-line 1)
-                  (let ((body-begin (point))
-                        (prefix (or (plist-get template :text-prefix) ""))
-                        (suffix (or (plist-get template :text-suffix) "")))
+                  (let ((body-begin (point)))
                     (goto-char end)
                     (forward-line 0)
                     (delete-region body-begin (point))
                     (goto-char body-begin)
-                    (dolist (line lines)
-                      ;; Colon-prefixed lines are Org fixed-width text, which
-                      ;; hides links from Org's parser and org-roam.
-                      (when (derived-mode-p 'org-mode)
-                        (setq line (string-remove-prefix ": " line)))
-                      (insert prefix line suffix "\n")))))))
+                    (insert (excalimacs--body template lines)))))))
           (when (bound-and-true-p excalimacs-minor-mode)
             (excalimacs-refresh))
           (when (and blocks (not was-modified) buffer-file-name
@@ -771,6 +915,150 @@ BASE-HASH is nil only when creating a new file."
             (excalimacs--json-reply 200 '(("updated" . t))))))
       (error
        (excalimacs--json-reply 400 `(("error" . ,(error-message-string err))))))))
+
+(httpd-servlet api/agent application/json (_path _query request)
+  (condition-case err
+      (cond
+       ((not (excalimacs--session-path request))
+        (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+       ((not (equal (caar request) "POST"))
+        (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
+       ((not (excalimacs--allowed-origin-p request))
+        (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+       (t
+        (let* ((body (decode-coding-string (cadr (assoc "Content" request)) 'utf-8))
+               (id (gethash "id" (json-parse-string body))))
+          (unless (stringp id) (error "Invalid agent result"))
+          (puthash id body excalimacs--agent-results)
+          (excalimacs--json-reply 200 '(("ok" . t))))))
+    (error
+     (excalimacs--json-reply 400 `(("error" . ,(error-message-string err)))))))
+
+(defun excalimacs--socket-send (process text)
+  "Send TEXT to WebSocket PROCESS as one unmasked text frame.
+Return non-nil on success; a socket that fails is closed."
+  (let* ((bytes (encode-coding-string text 'utf-8))
+         (size (length bytes)))
+    (condition-case nil
+        (progn
+          (process-send-string
+           process
+           (concat (unibyte-string #x81)
+                   (cond ((< size 126) (unibyte-string size))
+                         ((< size 65536) (unibyte-string 126 (ash size -8) (logand size 255)))
+                         (t (apply #'unibyte-string 127
+                                   (mapcar (lambda (shift) (logand (ash size (- shift)) 255))
+                                           '(56 48 40 32 24 16 8 0)))))
+                   bytes))
+          t)
+      (error (delete-process process) nil))))
+
+(defun excalimacs--live-sockets (path)
+  "Return open editor sockets for PATH, oldest first."
+  (setq excalimacs--sockets
+        (seq-filter (lambda (socket) (process-live-p (car socket))) excalimacs--sockets))
+  (reverse (seq-filter (lambda (socket) (equal (nth 3 socket) path)) excalimacs--sockets)))
+
+(defun excalimacs--notify (path)
+  "Tell every editor of PATH to fetch the latest drawing."
+  (dolist (socket (excalimacs--live-sockets path))
+    (excalimacs--socket-send (car socket) "{\"changed\":true}")))
+
+(defun excalimacs--flush-agent-queue (path)
+  "Send queued agent operations for PATH to its oldest open editor."
+  ;; One tab runs all operations so agents read what they wrote.
+  (when-let* ((socket (car (excalimacs--live-sockets path)))
+              (ops (gethash path excalimacs--agent-queue)))
+    (when (excalimacs--socket-send (car socket) (json-serialize `((ops . ,(vconcat ops)))))
+      (remhash path excalimacs--agent-queue))))
+
+(defun httpd/api/events (proc _path query request)
+  "Upgrade PROC to a WebSocket that pushes drawing changes for REQUEST's token."
+  (let* ((token (cadr (assoc "token" query)))
+         (tab (cadr (assoc "tab" query)))
+         (session (gethash token excalimacs--sessions))
+         (path (if (stringp session) session (plist-get session :path)))
+         (key (cadr (assoc "Sec-Websocket-Key" request))))
+    (if (not (and path key
+                  (excalimacs--allowed-origin-p (cons (list "X-Editor-Token" token) request))))
+        (httpd-error proc 403)
+      ;; The server only pushes, so client frames such as close are ignored.
+      (set-process-filter proc #'ignore)
+      (set-process-coding-system proc 'binary 'binary)
+      (process-send-string
+       proc (format "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n"
+                    (base64-encode-string
+                     (secure-hash 'sha1 (concat key "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+                                  nil nil t))))
+      (push (list proc token tab path) excalimacs--sockets)
+      (excalimacs--flush-agent-queue path))))
+
+(httpd-servlet api/broadcast application/json (_path _query request)
+  (let ((path (excalimacs--session-path request)))
+    (condition-case err
+        (cond
+         ((not path) (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         ((not (equal (caar request) "POST"))
+          (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
+         ((not (excalimacs--allowed-origin-p request))
+          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         (t
+          (let* ((text (decode-coding-string (cadr (assoc "Content" request)) 'utf-8))
+                 (data (json-parse-string text)))
+            (unless (and (vectorp (gethash "elements" data)) (stringp (gethash "tab" data)))
+              (error "Invalid broadcast"))
+            ;; Live edits skip the PNG round trip; the editing tab still saves them.
+            (dolist (socket (excalimacs--live-sockets path))
+              (unless (equal (nth 2 socket) (gethash "tab" data))
+                (excalimacs--socket-send (car socket) text)))
+            (excalimacs--json-reply 200 '(("ok" . t))))))
+      (error
+       (excalimacs--json-reply 400 `(("error" . ,(error-message-string err))))))))
+
+(defun excalimacs-agent-submit (request-file &optional immediate)
+  "Queue the agent operation in REQUEST-FILE and return its id.
+The file holds the operation on line 1, the drawing path on line 2 and
+the payload after that.  Opens the drawing when no editor is connected.
+IMMEDIATE applies the edit without drawing it gradually."
+  (pcase-let* ((`(,op ,path . ,payload)
+                (split-string (excalimacs--read request-file) "\n"))
+               (path (file-truename path))
+               (id (substring (excalimacs--token) 0 16)))
+    (unless (member op '("add" "mermaid" "update" "delete" "scene"))
+      (user-error "Unknown agent operation: %s" op))
+    ;; Open first, so an invalid drawing leaves nothing queued to run later.
+    (unless (excalimacs--live-sockets path)
+      (excalimacs-open path))
+    (puthash path (append (gethash path excalimacs--agent-queue)
+                          (list `((id . ,id) (op . ,op)
+                                  (presentation
+                                   . ,(if immediate :null
+                                        `((pixelsPerSecond . ,excalimacs-agent-drawing-speed)
+                                          (charactersPerSecond . ,excalimacs-agent-typing-speed)
+                                          (limit . ,excalimacs-agent-drawing-limit))))
+                                  (payload . ,(string-join payload "\n")))))
+             excalimacs--agent-queue)
+    (excalimacs--flush-agent-queue path)
+    id))
+
+(defun excalimacs-agent-result (id output-file)
+  "Write the result of agent operation ID to OUTPUT-FILE once it is ready.
+Return nil while pending, otherwise `ok', `conflict' or `error'."
+  (when-let* ((result (gethash id excalimacs--agent-results)))
+    (remhash id excalimacs--agent-results)
+    (excalimacs--atomic-write output-file (encode-coding-string result 'utf-8))
+    (let ((data (json-parse-string result)))
+      (cond ((gethash "current" data) 'conflict)
+            ((gethash "error" data) 'error)
+            (t 'ok)))))
+
+(defun excalimacs-agent-cancel (id)
+  "Forget agent operation ID, so a timed-out command never runs later."
+  (remhash id excalimacs--agent-results)
+  (maphash (lambda (path ops)
+             (puthash path (seq-remove (lambda (op) (equal (alist-get 'id op) id)) ops)
+                      excalimacs--agent-queue))
+           excalimacs--agent-queue))
 
 (defun excalimacs--start (&optional network)
   "Start the HTTP server, allowing LAN connections when NETWORK is non-nil."
@@ -836,6 +1124,8 @@ BASE-HASH is nil only when creating a new file."
     (excalimacs--log "Drawing access cleared: %s"
                     (if (stringp session) session (plist-get session :path))))
   (remhash token excalimacs--sessions)
+  (dolist (socket excalimacs--sockets)
+    (when (equal (nth 1 socket) token) (delete-process (car socket))))
   (excalimacs--diagnostics-schedule-refresh)
   (when (and excalimacs--owns-server (httpd-running-p)
              (equal httpd-host "0.0.0.0")
@@ -935,14 +1225,7 @@ With a prefix argument, choose browser, copy-url, or qr-code."
       (user-error "Drawing name must be a filename"))
     (make-directory directory t)
     (when (file-exists-p path) (user-error "Drawing already exists: %s" path))
-    (let* ((begin (plist-get template :begin))
-           (placeholder (string-match "{file}" begin)))
-      (unless placeholder (error "Excalimacs template :begin needs {file}"))
-      (insert (substring begin 0 placeholder)
-              (prin1-to-string path)
-              (substring begin (+ placeholder (length "{file}"))))
-      (when-let* ((end (plist-get template :end)))
-        (insert "\n" end)))
+    (insert (excalimacs--block-string template path))
     (when (bound-and-true-p excalimacs-minor-mode) (excalimacs-refresh))
     (excalimacs-open path)))
 

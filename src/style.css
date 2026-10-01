@@ -2,6 +2,9 @@ html, body, #root { margin: 0; height: 100%; }
 body { font-family: system-ui, sans-serif; }
 .app { height: 100%; position: relative; }
 .app > .excalidraw { height: 100%; }
+.agent-animation-layer { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; }
+.agent-animation-element { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+.agent-animation-element svg { display: block; overflow: visible; }
 aside { position: absolute; top: 8px; right: 8px; z-index: 10; max-width: 360px; padding: 12px; border-radius: 8px; background: #fff3d6; color: #222; font-size: 13px; box-shadow: 0 2px 12px #0003; }
 aside button { display: block; margin-top: 8px; cursor: pointer; }
 .message { padding: 24px; }

@@ -19,7 +19,7 @@ Tested with Emacs 30. Install with Elpaca:
 ```elisp
 (use-package excalimacs
   :ensure (:host github :repo "Gleek/excalimacs"
-           :files (:defaults "dist"))
+           :files (:defaults "dist" "bin" "skills"))
   :custom
   (excalimacs-directory "~/path/to/drawings")
   :hook ((org-mode markdown-mode prog-mode agent-shell-mode)
@@ -65,9 +65,11 @@ drawings open in separate browser tabs or windows. Use `M-x excalimacs-open`
 to open an existing drawing directly, including older `.excalidraw` files.
 
 Edits save after a short pause. `Ctrl+S` or `Cmd+S` saves immediately.
-A dot in the browser tab title means a save is still pending. If the file has
-changed elsewhere, Excalimacs rejects the conflicting save and offers an
-unsaved copy to download.
+A dot in the browser tab title means a save is still pending. Tabs and devices
+editing the same drawing stay in sync. Edits appear in the other tabs while
+you draw, and the tab you drew in saves them. Each tab merges incoming changes
+with its own edits. If the file is removed, Excalimacs
+stops saving and offers an unsaved copy to download.
 
 ### Open on a phone or tablet
 
@@ -84,6 +86,14 @@ would find text in your notes or code. Link targets are included too.
 The minor mode displays an image over this text. Toggle
 `M-x excalimacs-minor-mode` off to see or edit the underlying drawing block.
 Searchable text is updated from the drawing when you save it.
+
+### Copy drawings between modes
+
+Copy a drawing from one buffer and yank it into another, for example from
+an Org note into an agent-shell prompt. Excalimacs rewrites it in the
+target buffer's template. The searchable text comes along when the target
+keeps text, and is dropped when it doesn't, as in agent-shell. Both buffers
+need `excalimacs-minor-mode` on.
 
 ### Use the PNG
 
@@ -111,6 +121,21 @@ org-roam can index links to its nodes.
 Press Delete at the start of a preview or Backspace just after it to remove
 its block from the buffer. By default, Excalimacs asks whether to delete the
 drawing file too.
+
+### Draw with agents
+
+Agents can draw on a drawing while you watch and edit it too. They use the
+`bin/excalimacs` command, which talks to your running Emacs, and your browser
+shows each change being drawn. Install the skill that teaches an agent how to
+use it, for Claude Code and Codex:
+
+```sh
+bin/excalimacs install-skill
+```
+
+For another harness, pass its skills directory:
+`bin/excalimacs install-skill ~/.config/my-agent/skills`.
+Then hand the agent a drawing, for example with `@file` in agent-shell.
 
 ## Use it where you work
 
@@ -140,13 +165,16 @@ Run `M-x customize-group RET excalimacs RET`, or set these in your configuration
 | `excalimacs-delete-file` | Whether removing a drawing also deletes its file | `ask` (`t` to delete, `nil` to keep) |
 | `excalimacs-library-directory` | Where Excalidraw library files are stored | `excalimacs/` under `user-emacs-directory` |
 | `excalimacs-templates` | How drawings are inserted in each major mode | Org, Markdown, code, agent-shell, and plain text |
+| `excalimacs-agent-drawing-speed` | How fast agent edits are drawn, in pixels per second | `500` |
+| `excalimacs-agent-typing-speed` | How fast agent text is typed, in characters per second | `20` |
+| `excalimacs-agent-drawing-limit` | Longest time one agent edit takes to draw, in seconds | `8` |
 
 ### Libraries
 
 Library items you create are saved in `library.excalidrawlib` in the library
 directory. Libraries added from the Excalidraw website are saved there as
 separate files. You can also copy `.excalidrawlib` files into that directory.
-The editor checks it every two seconds, including for removed libraries.
+Refresh the editor page to pick up added, changed, or removed libraries.
 
 ### Adding other modes
 
@@ -247,12 +275,11 @@ to explore include:
 
 - An xwidget editor, so drawing and writing can happen within Emacs.
 - Richer org-roam integration for creating links and navigating backlinks.
-- Elisp drawing APIs for creating and editing diagrams programmatically.
-- Native collaboration so humans and LLM agents can work on a drawing together.
+- Live cursors and presence for people and agents editing together.
 - Custom Excalidraw plugins written in Elisp through the Emacs bridge.
 
 These are possibilities, not features available today. Editing currently
-happens in a browser, and live collaboration is not connected.
+happens in a browser.
 
 ## Development
 
@@ -270,6 +297,11 @@ EMACSLOADPATH=/path/to/simple-httpd: emacs -Q --batch -L . -l excalimacs.el -l t
 ```
 
 Or use the npm wrapper: `EMACSLOADPATH=/path/to/simple-httpd: npm test`.
+
+With Emacs running and Playwright Chromium installed, test CLI animations and
+concurrent editing across two tabs with `npm run test:browser`.
+Set `PLAYWRIGHT_MODULE` to a Playwright module path if it is installed elsewhere.
+The test uses a temporary drawing and moves it to Trash afterward.
 
 These cover stale-save rejection, Unicode request handling, and Org link creation. Full browser-to-Emacs integration has been exercised manually.
 

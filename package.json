@@ -6,10 +6,12 @@
     "prebuild": "node scripts/copy-fonts.mjs",
     "build": "vite build",
     "upgrade:excalidraw": "npm install --save-exact @excalidraw/excalidraw@next && npm run build",
-    "test": "emacs -Q --batch -L . -l excalimacs.el -l tests/excalimacs-test.el -f ert-run-tests-batch-and-exit"
+    "test": "emacs -Q --batch -L . -L ../emacs-web-server.github.skeeto -l excalimacs.el -l tests/excalimacs-test.el -f ert-run-tests-batch-and-exit",
+    "test:browser": "node tests/agent-animation-browser.cjs"
   },
   "dependencies": {
     "@excalidraw/excalidraw": "0.18.0-1118751",
+    "@excalidraw/mermaid-to-excalidraw": "2.2.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

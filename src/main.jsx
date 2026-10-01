@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
-  CommandPalette, Excalidraw, MainMenu, WelcomeScreen, exportToBlob,
-  loadSceneOrLibraryFromBlob, serializeAsJSON, serializeLibraryAsJSON,
+  CaptureUpdateAction, CommandPalette, Excalidraw, MainMenu, WelcomeScreen, exportToBlob,
+  loadSceneOrLibraryFromBlob, reconcileElements, serializeAsJSON, serializeLibraryAsJSON,
 } from "@excalidraw/excalidraw";
+import { runAgentOp } from "./agent.js";
+import { createAgentAnimator } from "./agent-animation.js";
 import "@excalidraw/excalidraw/index.css";
 import "./style.css";
 import logo from "./assets/excalimacs.svg";
@@ -18,6 +20,9 @@ if (token && !queryParams.has("token")) {
   queryParams.set("token", token);
   history.replaceState(null, "", `${location.pathname}?${queryParams}${location.hash}`);
 }
+
+// Distinguishes duplicated tabs, which share a session token.
+const tabId = Math.random().toString(36).slice(2);
 
 async function api(method, payload, path = "/api/drawing") {
   const response = await fetch(path, {
@@ -80,6 +85,8 @@ function searchableText(text) {
     .map((line) => `: ${line}`);
 }
 
+const versionsOf = (elements) => new Map(elements.map(({ id, version }) => [id, version]));
+
 function App() {
   const importOnly = !token && !!libraryToken && !!libraryUrl;
   const [document, setDocument] = useState(null);
@@ -101,12 +108,22 @@ function App() {
   const timerRef = useRef(null);
   const savingRef = useRef(null);
   const saveRef = useRef(null);
+  const syncRef = useRef(null);
+  const syncingRef = useRef(null);
+  const agentRef = useRef(Promise.resolve());
+  const sentRef = useRef(new Map());
+  // Element versions last seen on disk; relayed live edits never change this.
+  const diskRef = useRef(new Map());
+  const broadcastTimerRef = useRef(null);
+  const animatorRef = useRef(null);
+  const presentationsRef = useRef([]);
   const conflictRef = useRef(false);
   const previewPendingRef = useRef(0);
   const libraryHashRef = useRef(null);
   const libraryTextRef = useRef(null);
   const librarySaveRef = useRef(Promise.resolve());
   const importedLibraryRef = useRef(false);
+  const applyingLibraryRef = useRef(false);
 
   useEffect(() => {
     if (!token) return;
@@ -124,7 +141,13 @@ function App() {
     if (text === libraryTextRef.current) return;
     libraryTextRef.current = text;
     setLibraryItems(library.libraryItems);
-    await excalidrawAPI?.updateLibrary({ libraryItems: library.libraryItems, merge: false });
+    // Restored items serialize differently, so the echoed onLibraryChange must not be saved.
+    applyingLibraryRef.current = true;
+    try {
+      await excalidrawAPI?.updateLibrary({ libraryItems: library.libraryItems, merge: false });
+    } finally {
+      applyingLibraryRef.current = false;
+    }
   }, [excalidrawAPI]);
 
   useEffect(() => {
@@ -135,6 +158,8 @@ function App() {
     }
     loadDrawing().then(({ drawing, hash, name, format }) => {
       hashRef.current = hash;
+      markSent(drawing.elements);
+      diskRef.current = versionsOf(drawing.elements);
       savedRef.current = serializeAsJSON(drawing.elements, drawing.appState, drawing.files, "local");
       currentRef.current = savedRef.current;
       setDocument({ drawing, name, format });
@@ -162,28 +187,198 @@ function App() {
     }).catch(() => {});
   }, [excalidrawAPI, libraryItems]);
 
+  const markSent = (elements) => elements.forEach(({ id, version }) => sentRef.current.set(id, version));
+
   useEffect(() => {
     if (!excalidrawAPI) return;
-    const timer = setInterval(() => refreshLibrary().catch((failure) =>
-      setLibraryError(`Library could not be loaded: ${failure.message}`)), 2000);
-    return () => clearInterval(timer);
-  }, [excalidrawAPI, refreshLibrary]);
+    const animator = createAgentAnimator(excalidrawAPI, window.document.querySelector(".app > .excalidraw"));
+    animatorRef.current = animator;
+    // Reveal the final state before hit-testing or editing, including hidden elements.
+    for (const event of ["pointerdown", "keydown", "visibilitychange"])
+      window.document.addEventListener(event, animator.clear, true);
+    return () => {
+      animator.dispose();
+      animatorRef.current = null;
+      for (const event of ["pointerdown", "keydown", "visibilitychange"])
+        window.document.removeEventListener(event, animator.clear, true);
+    };
+  }, [excalidrawAPI]);
+
+  // Sends elements edited here to other tabs straight away; saving still follows.
+  const broadcast = useCallback((immediate = false) => {
+    if (!excalidrawAPI) return;
+    const send = () => {
+      broadcastTimerRef.current = null;
+      const elements = excalidrawAPI.getSceneElementsIncludingDeleted()
+        .filter(({ id, version }) => sentRef.current.get(id) !== version);
+      const presentations = presentationsRef.current.splice(0);
+      if (!elements.length && !presentations.length) return;
+      markSent(elements);
+      api("POST", { tab: tabId, elements, presentations }, "/api/broadcast").catch(() => {});
+    };
+    if (immediate) {
+      clearTimeout(broadcastTimerRef.current);
+      send();
+    } else if (!broadcastTimerRef.current) broadcastTimerRef.current = setTimeout(send, 100);
+  }, [excalidrawAPI]);
+
+  // Applies another tab's live edits; its own save will write them to disk.
+  const receive = useCallback((elements, presentations = []) => {
+    const clean = currentRef.current === savedRef.current;
+    const before = new Map(excalidrawAPI.getSceneElements().map((element) => [element.id, element]));
+    excalidrawAPI.updateScene({
+      elements: reconcileElements(excalidrawAPI.getSceneElementsIncludingDeleted(),
+        elements, excalidrawAPI.getAppState()),
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+    const scene = excalidrawAPI.getSceneElementsIncludingDeleted();
+    for (const { elements: shown, settings } of presentations) {
+      const versions = new Map(shown.map(({ id, version }) => [id, version]));
+      void animatorRef.current?.play(scene.filter((element) => versions.get(element.id) === element.version),
+        before, settings);
+    }
+    markSent(scene);
+    if (clean) savedRef.current = serializeAsJSON(scene, excalidrawAPI.getAppState(),
+      excalidrawAPI.getFiles(), "local");
+  }, [excalidrawAPI]);
+
+  const sync = useCallback(() => {
+    if (!excalidrawAPI || savingRef.current || conflictRef.current) return Promise.resolve();
+    syncingRef.current ||= (async () => {
+      try {
+        const { hash } = await api("GET", null, "/api/drawing?hash");
+        if (hash !== hashRef.current && !savingRef.current) await merge(hash);
+      } catch (failure) {
+        if (failure.status !== 409) return console.warn("Sync failed", failure);
+        conflictRef.current = true;
+        setConflict(true);
+        setStatus("Save blocked: file changed on disk");
+      } finally {
+        syncingRef.current = null;
+      }
+    })();
+    return syncingRef.current;
+
+    async function merge(hash) {
+      if (!hash) throw Object.assign(new Error("Drawing was removed"), { status: 409 });
+      const { drawing, hash: loadedHash } = await loadDrawing();
+      if (savingRef.current) return;
+      const saved = serializeAsJSON(drawing.elements, drawing.appState, drawing.files, "local");
+      const dirty = currentRef.current !== savedRef.current;
+      // Older versions on disk mean someone reverted the file, e.g. with git;
+      // merging by version would quietly undo that.
+      const disk = versionsOf(drawing.elements);
+      const reverted = [...diskRef.current].some(([id, version]) => !(disk.get(id) >= version));
+      if (reverted && dirty) throw Object.assign(new Error("Drawing reverted on disk"), { status: 409 });
+      hashRef.current = loadedHash;
+      diskRef.current = disk;
+      excalidrawAPI.addFiles(Object.values(drawing.files || {}));
+      excalidrawAPI.updateScene({
+        elements: reverted ? drawing.elements : reconcileElements(excalidrawAPI.getSceneElementsIncludingDeleted(),
+          drawing.elements, excalidrawAPI.getAppState()),
+        appState: JSON.parse(saved).appState,
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+      markSent(drawing.elements);
+      // The scene normalizes elements (e.g. boundElements [] to null), so a clean
+      // tab adopts its own serialization; a dirty one saves its merged edits.
+      savedRef.current = dirty ? saved : serializeAsJSON(excalidrawAPI.getSceneElementsIncludingDeleted(),
+        excalidrawAPI.getAppState(), excalidrawAPI.getFiles(), "local");
+    }
+  }, [excalidrawAPI]);
+  syncRef.current = sync;
+
+  // Saves the current scene now, merging and retrying if another editor saved first.
+  const commit = useCallback(async () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      currentRef.current = serializeAsJSON(excalidrawAPI.getSceneElementsIncludingDeleted(),
+        excalidrawAPI.getAppState(), excalidrawAPI.getFiles(), "local");
+      await saveRef.current();
+      if (currentRef.current === savedRef.current) return;
+      if (conflictRef.current) break;
+      await syncRef.current();
+    }
+    throw new Error("The change could not be saved");
+  }, [excalidrawAPI]);
+
+  useEffect(() => {
+    if (!excalidrawAPI) return;
+    let socket, retry, closed = false;
+    const connect = () => {
+      socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/api/events?token=${token}&tab=${tabId}`);
+      socket.onopen = () => void syncRef.current();
+      socket.onmessage = ({ data }) => {
+        const { ops, elements, presentations } = JSON.parse(data);
+        if (elements) return receive(elements, presentations);
+        if (!ops) return void syncRef.current();
+        agentRef.current = agentRef.current.then(async () => {
+          await syncRef.current();
+          for (const op of ops) {
+            const before = new Map(excalidrawAPI.getSceneElements().map((element) =>
+              [element.id, element]));
+            const result = await runAgentOp(excalidrawAPI, commit, op, () => {
+              if (!op.presentation) return void broadcast(true);
+              const elements = excalidrawAPI.getSceneElementsIncludingDeleted().filter((element) =>
+                !element.isDeleted && (!before.has(element.id) ||
+                  ["x", "y", "width", "height", "angle", "text", "points", "strokeColor", "backgroundColor",
+                    "fillStyle", "strokeWidth", "strokeStyle", "roughness", "opacity"].some((key) =>
+                    JSON.stringify(before.get(element.id)[key]) !== JSON.stringify(element[key]))));
+              presentationsRef.current.push({
+                elements: elements.map(({ id, version }) => ({ id, version })), settings: op.presentation,
+              });
+              broadcast(true);
+              return animatorRef.current?.play(elements, before, op.presentation);
+            });
+            await api("POST", { id: op.id, ...result }, "/api/agent");
+          }
+        }).catch((failure) => console.warn("Agent operation failed", failure));
+      };
+      // A revoked session gets 403 everywhere; stop retrying instead of looping.
+      socket.onclose = () => {
+        if (!closed) api("GET", null, "/api/drawing?hash").then(() => true, (failure) => failure.status !== 403)
+          .then((alive) => { if (alive && !closed) retry = setTimeout(connect, 2000); });
+      };
+    };
+    connect();
+    return () => {
+      closed = true;
+      clearTimeout(retry);
+      socket.close();
+    };
+  }, [excalidrawAPI, commit, receive, broadcast]);
+
+  useEffect(() => {
+    if (!excalidrawAPI) return;
+    const focus = () => void syncRef.current();
+    window.addEventListener("focus", focus);
+    return () => {
+      window.removeEventListener("focus", focus);
+    };
+  }, [excalidrawAPI]);
 
   const libraryChanged = useCallback((items) => {
     const text = serializeLibraryAsJSON(items);
-    if (text === libraryTextRef.current) return Promise.resolve();
+    if (applyingLibraryRef.current || text === libraryTextRef.current) return Promise.resolve();
     const pending = librarySaveRef.current.then(async () => {
       const result = await api("PUT", { baseHash: libraryHashRef.current, text }, "/api/library");
       libraryHashRef.current = result.hash;
       libraryTextRef.current = text;
       setLibraryError("");
-    }).catch((failure) => {
+    }).catch(async (failure) => {
+      if (failure.status === 409) {
+        // Take the disk library and re-add only items new here, so deletions elsewhere stick.
+        const known = new Set(JSON.parse(libraryTextRef.current || "{}").libraryItems?.map(({ id }) => id));
+        const added = items.filter(({ id }) => !known.has(id));
+        await refreshLibrary();
+        if (added.length) await excalidrawAPI.updateLibrary({ libraryItems: added, merge: true });
+        return;
+      }
       setLibraryError(`Library could not be saved: ${failure.message}. Export it from the library menu before closing.`);
       throw failure;
     });
     librarySaveRef.current = pending.catch(() => {});
     return pending;
-  }, []);
+  }, [excalidrawAPI, refreshLibrary]);
 
   const renderPreview = useCallback(async (text, hash) => {
     previewPendingRef.current += 1;
@@ -273,6 +468,7 @@ function App() {
     if (conflictRef.current || !currentRef.current || currentRef.current === savedRef.current)
       return Promise.resolve();
     const text = currentRef.current;
+    let stale = false;
     setStatus("Saving…");
     const pending = (async () => {
       try {
@@ -281,6 +477,7 @@ function App() {
           : await api("PUT", { baseHash: hashRef.current, text });
         hashRef.current = result.hash;
         savedRef.current = text;
+        diskRef.current = versionsOf(JSON.parse(text).elements);
         setError("");
         setStatus(currentRef.current === text ? "Saved" : "Unsaved changes");
         if (document?.format === "png") {
@@ -292,17 +489,15 @@ function App() {
           }
         } else void renderPreview(text, result.hash);
       } catch (failure) {
-        if (failure.status === 409) {
-          conflictRef.current = true;
-          setConflict(true);
-          setStatus("Save blocked: file changed on disk");
-        } else {
+        if (failure.status === 409) stale = true;
+        else {
           setStatus("Save failed");
           setError(failure.message);
         }
       } finally {
         savingRef.current = null;
-        if (!conflictRef.current && currentRef.current !== savedRef.current)
+        if (stale) void syncRef.current();
+        else if (!conflictRef.current && currentRef.current !== savedRef.current)
           timerRef.current = setTimeout(save, 1200);
       }
     })();
@@ -312,12 +507,14 @@ function App() {
   saveRef.current = save;
 
   const changed = useCallback((elements, appState, files) => {
+    animatorRef.current?.observe(elements);
     currentRef.current = serializeAsJSON(elements, appState, files, "local");
+    broadcast();
     if (currentRef.current === savedRef.current || conflictRef.current) return;
     setStatus("Unsaved changes");
     clearTimeout(timerRef.current);
     timerRef.current = setTimeout(save, 1200);
-  }, [save]);
+  }, [save, broadcast]);
 
   const openInApp = useCallback(async () => {
     try {
@@ -403,7 +600,7 @@ function App() {
     </aside>}
     {libraryError && <aside role="alert">{libraryError}</aside>}
     {importError && <aside role="alert">{importError}</aside>}
-    <Excalidraw excalidrawAPI={setExcalidrawAPI} libraryReturnUrl={libraryReturnUrl}
+    <Excalidraw onExcalidrawAPI={setExcalidrawAPI} libraryReturnUrl={libraryReturnUrl}
       handleKeyboardGlobally
       initialData={{ ...document.drawing, libraryItems }}
       onLibraryChange={libraryChanged} onChange={changed} onLinkOpen={openLink} theme={theme}

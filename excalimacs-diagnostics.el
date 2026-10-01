@@ -85,6 +85,9 @@ Sending large assets can run another request's timer.  simple-httpd
 otherwise reuses the interrupted response buffer, corrupting both replies."
   (if excalimacs--owns-server
       (let* ((excalimacs--request (cadr args))
+             ;; Live edits arrive several times a second while drawing.
+             (excalimacs-debug (and excalimacs-debug
+                                    (not (equal (cadar excalimacs--request) "/api/broadcast"))))
              (body (cadr (assoc "Content" excalimacs--request)))
              (proc (car args))
              (host (and (processp proc) (car (process-contact proc))))
