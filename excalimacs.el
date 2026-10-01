@@ -676,9 +676,10 @@ Bundle names carry no content hash, so browsers must revalidate them."
                            excalimacs--overlays)
                  (when-let* ((template (excalimacs--template))
                              (opening (plist-get template :begin)))
-                   (save-excursion
-                     (goto-char begin)
-                     (re-search-forward (excalimacs--template-regexp opening) end t)))))
+                   (save-match-data
+                     (save-excursion
+                       (goto-char begin)
+                       (re-search-forward (excalimacs--template-regexp opening) end t))))))
     (setq excalimacs--refresh-timer
           (run-at-time 0 nil
                        (lambda (buffer)

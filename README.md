@@ -124,7 +124,7 @@ drawing file too.
 
 ### Draw with agents
 
-Agents can draw on a drawing while you watch and edit it too. They use the
+Agents can edit a drawing while you watch and edit it too. They use the
 `bin/excalimacs` command, which talks to your running Emacs, and your browser
 shows each change being drawn. Install the skill that teaches an agent how to
 use it, for Claude Code and Codex:
@@ -145,7 +145,8 @@ use. It includes drawing formats for:
 - **Org:** diagrams alongside your notes, with searchable text and Org links.
 - **Markdown:** diagrams with their searchable text stored in an HTML comment.
 - **Code:** diagrams and searchable text stored using the language's comment syntax.
-- **agent-shell:** create drawings on the fly and send them to your agents.
+- **agent-shell:** send drawings to your agents and let them draw back; see
+  [Draw with agents](#draw-with-agents).
 - **Anywhere else:** enable the minor mode in another major mode using a hook; see
   [Adding other modes](#adding-other-modes) below.
 
@@ -252,6 +253,8 @@ This compares the original `wdavew/org-excalidraw`, not my fork.
 | Saving to Emacs | Click **Done** to submit | Save in PWA; file watcher updates SVG | Autosave, plus `Ctrl/Cmd+S` |
 | Multiple drawing sessions | Session-specific URLs; receiver also supports a queue | Delegated to PWA; no package-managed isolation | Separate sessions bound to drawing files |
 | Reject saves after external file changes | No file revision check found | No package-level check | Yes, file hash checks |
+| Live sync between tabs and devices | No; one-shot submit on **Done** | Delegated to PWA | Yes, edits broadcast as diffs |
+| Live agent editing | No it | No | Yes, through `bin/excalimacs` |
 | Phone/tablet drawing over LAN | Yes | No built-in remote workflow | Yes |
 | QR code opening | No built-in QR action found | No | Yes, requires `qrencode` |
 | Remote access controls | Optional device pairing | Not applicable | Per-drawing access tokens and revocation |
@@ -266,6 +269,17 @@ and [Emacs implementation](https://github.com/larrasket/org-draw/blob/master/org
 [original org-excalidraw documentation](https://github.com/wdavew/org-excalidraw)
 and [source](https://github.com/wdavew/org-excalidraw/blob/main/org-excalidraw.el).
 Excalimacs entries describe the implementation in this repository.
+
+### excali-mode
+
+[excali-mode](https://github.com/yibie/excali-mode) takes a different
+approach. It ports Excalidraw's editor to Emacs Lisp and a C module, and
+draws on Emacs 32's new canvas API, so you edit `.excalidraw` files in an
+Emacs buffer without a browser. Excalimacs keeps the browser editor and
+focuses on embedding drawings in other buffers, searchable text, Org links,
+remote devices and agents. The two projects started around the same time,
+and I didn't know about excali-mode when I began Excalimacs. Using it as an
+in-Emacs editor for Excalimacs is a possible future direction.
 
 ## Where it could go
 
