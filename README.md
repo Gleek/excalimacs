@@ -254,7 +254,7 @@ This compares the original `wdavew/org-excalidraw`, not my fork.
 | Multiple drawing sessions | Session-specific URLs; receiver also supports a queue | Delegated to PWA; no package-managed isolation | Separate sessions bound to drawing files |
 | Reject saves after external file changes | No file revision check found | No package-level check | Yes, file hash checks |
 | Live sync between tabs and devices | No; one-shot submit on **Done** | Delegated to PWA | Yes, edits broadcast as diffs |
-| Live agent editing | No it | No | Yes, through `bin/excalimacs` |
+| Live agent editing | No | No | Yes, through `bin/excalimacs` |
 | Phone/tablet drawing over LAN | Yes | No built-in remote workflow | Yes |
 | QR code opening | No built-in QR action found | No | Yes, requires `qrencode` |
 | Remote access controls | Optional device pairing | Not applicable | Per-drawing access tokens and revocation |

@@ -843,13 +843,12 @@ Bundle names carry no content hash, so browsers must revalidate them."
     (excalimacs-refresh)))
 
 (defun excalimacs--replace-block-text (path lines)
-  "Replace searchable text in open templates for PATH with LINES."
+  "Replace searchable text in open templates for PATH with LINES without saving."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when-let* ((template (excalimacs--template))
                   ((excalimacs--text-p template)))
-        (let ((blocks (reverse (excalimacs--blocks path)))
-              (was-modified (buffer-modified-p)))
+        (let ((blocks (reverse (excalimacs--blocks path))))
           (dolist (block blocks)
             (pcase-let ((`(,begin ,end ,_file) block))
               (let ((inhibit-read-only '(excalimacs)))
@@ -863,10 +862,7 @@ Bundle names carry no content hash, so browsers must revalidate them."
                     (goto-char body-begin)
                     (insert (excalimacs--body template lines)))))))
           (when (bound-and-true-p excalimacs-minor-mode)
-            (excalimacs-refresh))
-          (when (and blocks (not was-modified) buffer-file-name
-                     (file-exists-p buffer-file-name))
-            (save-buffer)))))))
+            (excalimacs-refresh)))))))
 
 (httpd-servlet api/text application/json (_path _query request)
   (let ((path (excalimacs--session-path request)))
