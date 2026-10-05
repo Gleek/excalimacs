@@ -116,6 +116,11 @@ through Emacs. Normal Org link confirmations still apply.
 In Org buffers, these links are also included in the searchable text, so
 org-roam can index links to its nodes.
 
+To link from Org to a drawing, use `[[excalimacs:/path/to/drawing.excalidraw.png]]`.
+In the editor, right-click a selected element or group and choose **Copy link
+to object**. Paste the link into Org or attach it to an element in another
+drawing. Opening it shows the drawing focused on the linked element or group.
+
 ### Remove a drawing
 
 Press Delete at the start of a preview or Backspace just after it to remove
@@ -169,6 +174,21 @@ Run `M-x customize-group RET excalimacs RET`, or set these in your configuration
 | `excalimacs-agent-drawing-speed` | How fast agent edits are drawn, in pixels per second | `500` |
 | `excalimacs-agent-typing-speed` | How fast agent text is typed, in characters per second | `20` |
 | `excalimacs-agent-drawing-limit` | Longest time one agent edit takes to draw, in seconds | `8` |
+
+### Custom plugin support
+
+Excalimacs supports custom plugins. It ships with:
+
+- **pens:** adds Highlighter and Thick → thin pens, useful for mind mapping.
+
+Enable it with:
+
+```elisp
+(setq excalimacs-plugins '(pens))
+```
+
+Reload the editor tab, then select the freehand tool to find **Custom pens**
+in its settings panel.
 
 ### Libraries
 

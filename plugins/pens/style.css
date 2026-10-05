@@ -1,0 +1,36 @@
+.pens-toolbar { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border-radius: 8px;
+  background: var(--island-bg-color, white); }
+.pens-toolbar button { font: inherit; font-size: 12px; white-space: nowrap; padding: 7px 5px;
+  border: 0; border-radius: 5px; cursor: pointer; color: var(--text-primary-color, #222);
+  background: transparent; }
+.pens-toolbar button[aria-pressed="true"] { background: var(--color-primary-light, #e3ddff); }
+@media (max-width: 600px) { .pens-toolbar button { padding: 7px 5px; font-size: 11px; } }
+
+.pen-preview { position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 1; overflow: hidden; }
+
+.pens-plugin { position: relative; min-width: 0; pointer-events: auto; }
+.pens-plugin legend { font-size: 12px; }
+.mobile-shape-actions .pens-plugin { border: 0; }
+.mobile-shape-actions .pens-toolbar { display: flex; }
+.mobile-shape-actions .pens-plugin legend { display: none; }
+.pen-settings { color: var(--text-primary-color, #222); }
+.mobile-shape-actions .pen-settings { position: absolute; bottom: calc(100% + 8px); right: 0;
+  width: 190px; padding: 12px; border-radius: 8px; background: var(--island-bg-color, white);
+  box-shadow: 0 2px 12px #0003; }
+.pen-settings label { display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin: 8px 0; font-size: 12px; text-transform: capitalize; }
+.pen-settings input[type=range] { width: 110px; }
+
+/* Pen outlines use native color/opacity, with a pen-width control instead of borders. */
+.excalidraw.pen-selection div.selected-shape-actions > div:has([data-openpopup="elementBackground"]),
+.excalidraw.pen-selection .compact-action-item:has([data-openpopup="elementBackground"]),
+.excalidraw.pen-selection .selected-shape-actions fieldset:has([data-testid="fill-solid"]),
+.excalidraw.pen-selection .selected-shape-actions fieldset:has([data-testid="strokeWidth-thin"]),
+.excalidraw.pen-selection .selected-shape-actions fieldset:has(input[name="strokeStyle"]),
+.excalidraw.pen-selection .selected-shape-actions fieldset:has(input[name="sloppiness"]),
+.excalidraw.pen-selection .selected-shape-actions fieldset:has(input[name="edges"]) { display: none; }
+.pen-selection-settings { pointer-events: auto; }
+
+.excalidraw.pen-selection button[aria-label="Edit points"],
+.excalidraw.pen-selection .HintViewer { display: none; }

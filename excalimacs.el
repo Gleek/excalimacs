@@ -16,6 +16,11 @@
 
 (defgroup excalimacs nil "Local Excalidraw editor." :group 'applications)
 
+(defcustom excalimacs-plugins nil
+  "Optional browser plugins to enable.  Reload editor tabs after changing this.
+Currently available: `pens' (normal, highlighter, and thick-to-thin pens)."
+  :type '(set (const pens)))
+
 (defcustom excalimacs-dist-directory
   (expand-file-name "dist" (file-name-directory (or load-file-name buffer-file-name)))
   "Directory containing the built browser application."
@@ -412,6 +417,38 @@ Bundle names carry no content hash, so browsers must revalidate them."
                                   (concat "excalimacs-library:"
                                           (cadr (assoc "X-Editor-Token" request))))))))))
 
+(httpd-servlet api/plugins application/json (_path _query request)
+  (condition-case err
+      (let* ((path (expand-file-name "plugin-settings.json" excalimacs-library-directory))
+             (method (caar request))
+             (settings (if (file-exists-p path)
+                           (json-parse-string (excalimacs--read path))
+                         (make-hash-table :test #'equal))))
+        (cond
+         ((not (excalimacs--session-path request))
+          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         ((equal method "GET")
+          (excalimacs--json-reply
+           200 `(("plugins" . ,(vconcat (mapcar #'symbol-name excalimacs-plugins)))
+                 ("settings" . ,settings))))
+         ((not (equal method "PUT"))
+          (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
+         ((not (excalimacs--allowed-origin-p request))
+          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         (t
+          (let* ((body (decode-coding-string (cadr (assoc "Content" request)) 'utf-8))
+                 (_ (when (> (length body) 16384) (error "Plugin settings too large")))
+                 (data (json-parse-string body))
+                 (name (gethash "name" data))
+                 (value (gethash "settings" data)))
+            (unless (and (equal name "pens") (hash-table-p value))
+              (error "Invalid plugin settings"))
+            (puthash name value settings)
+            (make-directory excalimacs-library-directory t)
+            (excalimacs--atomic-write path (encode-coding-string (json-serialize settings) 'utf-8))
+            (excalimacs--json-reply 200 '(("ok" . t)))))))
+    (error (excalimacs--json-reply 400 `(("error" . ,(error-message-string err)))))))
+
 (httpd-servlet api/drawing application/json (_path query request)
   (let ((path (excalimacs--session-path request))
         (method (caar request)))
@@ -497,6 +534,15 @@ Bundle names carry no content hash, so browsers must revalidate them."
           (excalimacs--json-reply 200 '(("opened" . t)))))
       (error
        (excalimacs--json-reply 400 `(("error" . ,(error-message-string err))))))))
+
+(httpd-servlet api/link application/json (_path _query request)
+  (let ((path (excalimacs--session-path request)))
+    (cond
+     ((not path) (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+     ((not (equal (caar request) "GET"))
+      (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
+     (t (excalimacs--json-reply
+         200 `(("link" . ,(concat "excalimacs:" (url-hexify-string path)))))))))
 
 (httpd-servlet api/open-link application/json (_path _query request)
   (let ((path (excalimacs--session-path request)))
@@ -1159,9 +1205,24 @@ Return nil while pending, otherwise `ok', `conflict' or `error'."
     (pop-to-buffer buffer)))
 
 ;;;###autoload
-(defun excalimacs-open (path &optional action)
+(defun excalimacs--follow-link (link _arg)
+  "Open an Org LINK to a drawing, optionally focused on an element or group."
+  (unless (string-match "\\`\\([^#]+\\)\\(?:#\\(element\\|group\\)=\\([^#&]+\\)\\)?\\'" link)
+    (user-error "Invalid Excalimacs link: %s" link))
+  (let ((path (match-string 1 link))
+        (target (when (match-string 2 link)
+                  (concat (match-string 2 link) "=" (match-string 3 link)))))
+    (excalimacs-open (decode-coding-string (url-unhex-string path) 'utf-8)
+                    'browser target)))
+
+;;;###autoload
+(org-link-set-parameters "excalimacs" :follow #'excalimacs--follow-link)
+
+;;;###autoload
+(defun excalimacs-open (path &optional action target)
   "Open drawing PATH using ACTION or `excalimacs-open-action'.
-With a prefix argument, choose browser, copy-url, or qr-code."
+With a prefix argument, choose browser, copy-url, or qr-code.
+TARGET, when non-nil, is an element=ID or group=ID viewport target."
   (interactive (list (read-file-name "Drawing: ")
                      (when current-prefix-arg
                        (intern (completing-read "Open action: "
@@ -1186,7 +1247,8 @@ With a prefix argument, choose browser, copy-url, or qr-code."
     (let* ((port (excalimacs--start network))
            (token (excalimacs--token))
            (origin (format "http://%s:%s" address port))
-           (url (format "%s/?token=%s" origin token)))
+           (url (concat (format "%s/?token=%s" origin token)
+                        (when target (concat "#" target)))))
       (puthash token (list :path path :origin origin) excalimacs--sessions)
       (excalimacs--log "Drawing opened (%s): %s" action path)
       (excalimacs--diagnostics-schedule-refresh)

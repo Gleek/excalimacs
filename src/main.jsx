@@ -6,9 +6,11 @@ import {
 } from "@excalidraw/excalidraw";
 import { runAgentOp } from "./agent.js";
 import { createAgentAnimator } from "./agent-animation.js";
+import { linkTarget, selectionLink } from "./drawing-links.js";
 import "@excalidraw/excalidraw/index.css";
 import "./style.css";
 import logo from "./assets/excalimacs.svg";
+import { usePens } from "../plugins/pens/index.jsx";
 
 window.EXCALIDRAW_ASSET_PATH = "/";
 const hashParams = new URLSearchParams(location.hash.slice(1));
@@ -100,6 +102,19 @@ function App() {
   const [importError, setImportError] = useState("");
   const [libraryItems, setLibraryItems] = useState(null);
   const [excalidrawAPI, setExcalidrawAPI] = useState(null);
+  const [plugins, setPlugins] = useState([]);
+  const [pluginSettings, setPluginSettings] = useState(null);
+  const pluginSaveRef = useRef(Promise.resolve());
+  const pluginPendingRef = useRef(0);
+  const savePenSettings = useCallback((settings) => {
+    pluginPendingRef.current++;
+    pluginSaveRef.current = pluginSaveRef.current.catch(() => {}).then(() =>
+      api("PUT", { name: "pens", settings }, "/api/plugins"))
+      .finally(() => { pluginPendingRef.current--; });
+    pluginSaveRef.current.catch((failure) => setError(`Pen settings could not be saved: ${failure.message}`));
+  }, []);
+  const pens = usePens(plugins.includes("pens") ? excalidrawAPI : null,
+    pluginSettings?.pens, savePenSettings);
   const [themePreference, setThemePreference] = useState("system");
   const [systemDark, setSystemDark] = useState(() => matchMedia("(prefers-color-scheme: dark)").matches);
   const hashRef = useRef(null);
@@ -127,6 +142,9 @@ function App() {
 
   useEffect(() => {
     if (!token) return;
+    api("GET", null, "/api/plugins")
+      .then(({ plugins, settings }) => { setPluginSettings(settings); setPlugins(plugins); })
+      .catch((failure) => setError(`Plugins could not be loaded: ${failure.message}`));
     api("GET", null, "/api/library-token")
       .then(({ token: scoped }) => {
         localStorage.setItem(`excalimacs-return:${scoped}`, token);
@@ -156,15 +174,22 @@ function App() {
         .catch((failure) => setImportResult(`Library import failed: ${failure.message}`));
       return;
     }
-    loadDrawing().then(({ drawing, hash, name, format }) => {
-      hashRef.current = hash;
-      markSent(drawing.elements);
-      diskRef.current = versionsOf(drawing.elements);
-      savedRef.current = serializeAsJSON(drawing.elements, drawing.appState, drawing.files, "local");
-      currentRef.current = savedRef.current;
-      setDocument({ drawing, name, format });
-      setStatus("Saved");
-    }).catch((failure) => setError(failure.message));
+    Promise.all([loadDrawing(), api("GET", null, "/api/link")])
+      .then(([{ drawing, hash, name, format }, { link }]) => {
+        hashRef.current = hash;
+        markSent(drawing.elements);
+        diskRef.current = versionsOf(drawing.elements);
+        savedRef.current = serializeAsJSON(drawing.elements, drawing.appState, drawing.files, "local");
+        currentRef.current = savedRef.current;
+        const target = linkTarget(drawing.elements, location.hash);
+        const viewportElements = target?.length === 0
+          ? drawing.elements.filter((element) => !element.isDeleted) : target;
+        setDocument({ drawing, name, format, link,
+          targetMissing: target?.length === 0,
+          viewport: viewportElements?.length
+            ? { target: viewportElements, fit: "scale-down", offsets: { ui: true } } : undefined });
+        setStatus("Saved");
+      }).catch((failure) => setError(failure.message));
   }, []);
 
   useEffect(() => {
@@ -547,7 +572,7 @@ function App() {
       }
     };
     const beforeUnload = (event) => {
-      if (currentRef.current !== savedRef.current || previewPendingRef.current > 0) {
+      if (currentRef.current !== savedRef.current || previewPendingRef.current > 0 || pluginPendingRef.current > 0) {
         event.preventDefault();
         event.returnValue = "";
       }
@@ -600,12 +625,16 @@ function App() {
     </aside>}
     {libraryError && <aside role="alert">{libraryError}</aside>}
     {importError && <aside role="alert">{importError}</aside>}
+    {document.targetMissing && <aside role="alert">The linked element or group no longer exists. Showing the full drawing.</aside>}
     <Excalidraw onExcalidrawAPI={setExcalidrawAPI} libraryReturnUrl={libraryReturnUrl}
       handleKeyboardGlobally
       initialData={{ ...document.drawing, libraryItems }}
+      initialState={{ viewport: document.viewport }}
+      generateLinkForSelection={(id, type) => selectionLink(document.link, id, type)}
       onLibraryChange={libraryChanged} onChange={changed} onLinkOpen={openLink} theme={theme}
       onThemeChange={setThemePreference}
       UIOptions={{ canvasActions: { toggleTheme: true } }}>
+      {pens}
       <MainMenu>
         <MainMenu.Item disabled>Open… (use Emacs)</MainMenu.Item>
         <MainMenu.Item onSelect={() => void openInApp()}>Open in Excalidraw app (Alt+Shift+O)</MainMenu.Item>
