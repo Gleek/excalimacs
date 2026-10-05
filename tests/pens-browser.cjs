@@ -45,7 +45,9 @@ const browser=await chromium.launch(process.env.CHROMIUM_PATH ? {executablePath:
 try {
 const page=await browser.newPage({viewport:{width:1400,height:900}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
 await page.route('**/src/main.jsx',async route=>{const r=await route.fetch();let body=await r.text();body=body.replace('onExcalidrawAPI: setExcalidrawAPI','onExcalidrawAPI: (api) => { window.__api = api; window.__waitForPenSettings = () => pluginSaveRef.current; setExcalidrawAPI(api); }');await route.fulfill({response:r,body});});
-const url=new URL(source);url.host=new URL(server.resolvedUrls.local[0]).host;await page.goto(url.href);await page.waitForFunction(()=>window.__api);await page.getByRole('toolbar',{name:'Pens'}).waitFor();
+const url=new URL(source);url.host=new URL(server.resolvedUrls.local[0]).host;await page.goto(url.href);await page.waitForFunction(()=>window.__api && !window.__api.getAppState().isLoading);
+assert.equal(await page.evaluate(()=>window.__api.getAppState().activeTool.type),'selection','loading does not select the pen');
+await page.keyboard.press('p');await page.getByRole('toolbar',{name:'Pens'}).waitFor();
 assert.equal(await page.locator('.excalidraw-ui-top-right .pens-plugin').count(),0);
 const draw=async(label,y,custom=false)=>{
   await page.getByRole('button',{name:label,exact:true}).click();
@@ -61,10 +63,19 @@ const draw=async(label,y,custom=false)=>{
   await page.mouse.move(800,y-190,{steps:8});
   if(custom) await page.screenshot({path:'/tmp/excalimacs-pens-live-'+label.replaceAll(' ','-')+'.png'});
   await page.mouse.up();await page.waitForTimeout(150);
+  assert.equal(await page.evaluate(()=>window.__api.getAppState().activeTool.type),'freedraw','pen stays active after drawing');
+  assert.equal(await page.evaluate(()=>window.__api.getAppState().activeTool.locked),false,'pen does not enable the global tool lock');
   if(custom) assert.equal(await page.locator('.pen-preview path').getAttribute('d'),null);
   return page.evaluate(()=>window.__api.getSceneElements()[0]);
 };
 const normal=await draw('Normal',300);assert.equal(normal.type,'freedraw');assert.equal(normal.opacity,100);
+await page.keyboard.press('r');
+await page.mouse.move(950,300);await page.mouse.down();
+await page.mouse.move(1050,380,{steps:5});await page.mouse.up();
+await page.waitForFunction(()=>window.__api.getAppState().activeTool.type==='selection');
+await page.keyboard.press('Meta+z');
+await page.waitForFunction(()=>window.__api.getSceneElements().length===1);
+await page.keyboard.press('p');
 await draw('Highlighter',400,true);
 let scene=await page.evaluate(()=>window.__api.getSceneElements());const highlight=scene[0];
 assert.equal(highlight.opacity,30);assert.equal(highlight.type,'line');assert.equal(highlight.customData.excalimacsPen.preset,'highlighter');
@@ -120,7 +131,8 @@ await page.waitForFunction(async()=>{
 });
 await page.evaluate(()=>window.__waitForPenSettings());await page.keyboard.press('Meta+s');await page.waitForFunction(()=>!document.title.startsWith('●'));
 await page.reload();await page.waitForFunction(()=>window.__api?.getSceneElements().length===3);
-assert.equal(await page.evaluate(()=>window.__api.getAppState().activeTool.type),'freedraw');
+assert.equal(await page.evaluate(()=>window.__api.getAppState().activeTool.type),'selection');
+await page.keyboard.press('p');await page.getByRole('toolbar',{name:'Pens'}).waitFor();
 assert.equal(await page.getByRole('button',{name:'Thick → thin',exact:true}).getAttribute('aria-pressed'),'true');
 assert.deepEqual(await penStyle(),['#6688aa','thin',60,'variable']);
 const customized=await draw('Thick → thin',650,true);
@@ -146,6 +158,19 @@ await page.evaluate(()=>window.__api.updateScene({appState:{currentItemStrokeCol
 await page.keyboard.press('p');
 await page.getByRole('toolbar',{name:'Pens'}).waitFor();
 assert.equal(await page.evaluate(()=>window.__api.getAppState().currentItemStrokeColor),normal.strokeColor);
+// Normal pen colors must not become defaults for shapes.
+await page.evaluate(()=>window.__api.updateScene({appState:{currentItemStrokeColor:'#2f9e44'}}));
+await page.keyboard.press('r');
+await page.waitForFunction(color=>window.__api.getAppState().currentItemStrokeColor===color,'#ff0000');
+// An explicitly changed shape color survives visits to every pen preset.
+await page.evaluate(()=>window.__api.updateScene({appState:{currentItemStrokeColor:'#1971c2'}}));
+for (const preset of ['Normal','Highlighter','Thick → thin']) {
+ await page.keyboard.press('p');await page.getByRole('toolbar',{name:'Pens'}).waitFor();
+ await page.getByRole('button',{name:preset,exact:true}).click();
+ await page.keyboard.press('r');
+ await page.waitForFunction(()=>window.__api.getAppState().currentItemStrokeColor==='#1971c2');
+}
+await page.keyboard.press('p');await page.getByRole('toolbar',{name:'Pens'}).waitFor();
 // Reproduce the reference: a tapered branch must sit behind the box border.
 await page.evaluate(normal=>window.__api.updateScene({elements:[{
  ...normal,id:'pen-box',type:'rectangle',x:390,y:440,width:150,height:120,

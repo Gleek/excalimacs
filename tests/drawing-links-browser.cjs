@@ -21,7 +21,7 @@ const root = require('node:path').resolve(__dirname, '..');
       const data = {
         '/api/drawing': { drawing: { elements: [
           { id: 'target', type: 'rectangle', x: 5000, y: 5000, width: 200, height: 100, groupIds: ['group'] },
-          { id: 'distant', type: 'rectangle', x: -5000, y: -5000, width: 200, height: 100 },
+          { id: 'distant', type: 'rectangle', x: 3000, y: 3000, width: 200, height: 100 },
         ], appState: {}, files: {} }, hash: 'test', name: 'diagram.excalidraw.png', format: 'png' },
         '/api/link': { link: baseLink },
         '/api/plugins': { plugins: [], settings: {} },
@@ -37,6 +37,28 @@ const root = require('node:path').resolve(__dirname, '..');
       await route.fulfill({ response, body });
     });
     const origin = server.resolvedUrls.local[0];
+    // First opens fit content; reloads restore the user's zoom and pan.
+    const assertSceneVisible = () => page.waitForFunction(() => {
+      const api = window.__api;
+      if (api?.getSceneElements().length !== 2) return false;
+      const state = api.getAppState();
+      return api.getSceneElements().every(element => {
+        const x = (element.x + element.width / 2 + state.scrollX) * state.zoom.value;
+        const y = (element.y + element.height / 2 + state.scrollY) * state.zoom.value;
+        return x > 0 && x < state.width && y > 0 && y < state.height;
+      });
+    });
+    await page.goto(`${origin}?token=test`);
+    await assertSceneVisible();
+    const savedView = { scrollX: -4900, scrollY: -4800, zoom: { value: 1.5 } };
+    await page.evaluate(view => window.__api.updateScene({ appState: view }), savedView);
+    await page.waitForFunction(({ key, view }) => localStorage.getItem(key) === JSON.stringify(view),
+      { key: `excalimacs-view:${baseLink}`, view: { zoom: savedView.zoom, scrollX: savedView.scrollX, scrollY: savedView.scrollY } });
+    await page.reload();
+    await page.waitForFunction(view => {
+      const state = window.__api?.getAppState();
+      return state?.zoom.value === view.zoom.value && state.scrollX === view.scrollX && state.scrollY === view.scrollY;
+    }, savedView);
     for (const target of ['element=target', 'group=group']) {
       await page.goto(`${origin}?token=test&case=${target}#${target}`);
       await page.waitForFunction(() => window.__api?.getSceneElements().length === 2);
@@ -60,8 +82,9 @@ const root = require('node:path').resolve(__dirname, '..');
     assert.equal(await page.evaluate(() => navigator.clipboard.readText()), `${baseLink}#element=target`);
     await page.goto(`${origin}?token=test&case=missing#element=missing`);
     await page.getByRole('alert').filter({ hasText: 'no longer exists' }).waitFor();
+    await assertSceneVisible();
     assert.deepEqual(errors, []);
-    console.log('Focused element/group opening, whole-scene preservation, clipboard links, and missing-target notice passed.');
+    console.log('Initial/reloaded viewport, focused element/group opening, clipboard links, and missing-target fallback passed.');
   } finally {
     await browser?.close();
     await server.close();

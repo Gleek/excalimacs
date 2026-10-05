@@ -182,11 +182,19 @@ function App() {
         savedRef.current = serializeAsJSON(drawing.elements, drawing.appState, drawing.files, "local");
         currentRef.current = savedRef.current;
         const target = linkTarget(drawing.elements, location.hash);
-        const viewportElements = target?.length === 0
+        const viewportElements = !target?.length
           ? drawing.elements.filter((element) => !element.isDeleted) : target;
+        let savedView;
+        try {
+          savedView = JSON.parse(localStorage.getItem(`excalimacs-view:${link}`));
+        } catch { /* Browser storage may be unavailable. */ }
+        const restoreView = !target && savedView &&
+          Number.isFinite(savedView.scrollX) && Number.isFinite(savedView.scrollY) &&
+          Number.isFinite(savedView.zoom?.value) && savedView.zoom.value > 0;
+        if (restoreView) drawing.appState = { ...drawing.appState, ...savedView };
         setDocument({ drawing, name, format, link,
           targetMissing: target?.length === 0,
-          viewport: viewportElements?.length
+          viewport: !restoreView && viewportElements?.length
             ? { target: viewportElements, fit: "scale-down", offsets: { ui: true } } : undefined });
         setStatus("Saved");
       }).catch((failure) => setError(failure.message));
@@ -533,13 +541,19 @@ function App() {
 
   const changed = useCallback((elements, appState, files) => {
     animatorRef.current?.observe(elements);
+    if (document?.link) {
+      try {
+        const { zoom, scrollX, scrollY } = appState;
+        localStorage.setItem(`excalimacs-view:${document.link}`, JSON.stringify({ zoom, scrollX, scrollY }));
+      } catch { /* Drawing edits must still work without browser storage. */ }
+    }
     currentRef.current = serializeAsJSON(elements, appState, files, "local");
     broadcast();
     if (currentRef.current === savedRef.current || conflictRef.current) return;
     setStatus("Unsaved changes");
     clearTimeout(timerRef.current);
     timerRef.current = setTimeout(save, 1200);
-  }, [save, broadcast]);
+  }, [save, broadcast, document?.link]);
 
   const openInApp = useCallback(async () => {
     try {

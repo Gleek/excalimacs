@@ -21,7 +21,7 @@ function initialSettings(saved, state) {
     tapered: { color: "#CECDCC", width: normal.width, opacity: normal.opacity,
       thinning: 1, smoothing: 0.5, streamline: 0.5 },
   };
-  return { active: presets.some(([id]) => id === saved?.active) ? saved.active : "normal",
+  return { shapeStyle: saved?.shapeStyle ?? normal, active: presets.some(([id]) => id === saved?.active) ? saved.active : "normal",
     pens: Object.fromEntries(presets.map(([id]) => [id, { ...defaults[id], ...saved?.pens?.[id] }])) };
 }
 
@@ -51,7 +51,7 @@ export function usePens(editor, saved, saveSettings) {
   };
   const apply = (next) => {
     applyStyle(next.pens[next.active]);
-    editor.setActiveTool({ type: "freedraw", locked: true });
+    editor.setActiveTool({ type: "freedraw" });
   };
   const update = (next) => { remember(next); apply(next); };
 
@@ -62,9 +62,7 @@ export function usePens(editor, saved, saveSettings) {
     setSettings(next);
     setSelected([]);
     selectionKey.current = "";
-    let loading = editor.getAppState().isLoading;
-    let drawingPen = true;
-    if (!loading) apply(next);
+    let drawingPen = false;
     const container = document.querySelector(".app > .excalidraw");
     const dispose = createPenTool(editor, container, () => current.current);
     // No upstream panel extension slot: isolate the DOM attachment here.
@@ -86,15 +84,18 @@ export function usePens(editor, saved, saveSettings) {
         selectionKey.current = key;
         setSelected(onlyPens ? selection : []);
       }
-      if (state.isLoading) { loading = true; return; }
-      if (loading) { loading = false; apply(current.current); return; }
+      if (state.isLoading) return;
       const { active, pens } = current.current;
       const tool = state.activeTool;
       setVisible(tool.type === "freedraw" && !state.viewModeEnabled && !state.zenModeEnabled);
       if (tool.type !== "freedraw") {
         if (drawingPen) {
           drawingPen = false;
-          applyStyle(pens.normal);
+          applyStyle(current.current.shapeStyle);
+        } else if (!selection.length) {
+          const shapeStyle = styleOf(state);
+          if (Object.keys(shapeStyle).some((key) => shapeStyle[key] !== current.current.shapeStyle[key]))
+            remember({ ...current.current, shapeStyle });
         }
         return;
       }
@@ -104,7 +105,7 @@ export function usePens(editor, saved, saveSettings) {
         .filter(([key, value]) => value !== appliedStyle.current?.[key]));
       if (!Object.keys(changes).length) return;
       appliedStyle.current = style;
-      remember({ active, pens: { ...pens, [active]: { ...pens[active], ...changes } } });
+      remember({ ...current.current, pens: { ...pens, [active]: { ...pens[active], ...changes } } });
     });
     return () => { dispose(); unsubscribe(); observer.disconnect(); container.classList.remove("pen-selection"); window.removeEventListener("resize", locatePanel); };
   }, [editor]);
@@ -112,7 +113,7 @@ export function usePens(editor, saved, saveSettings) {
   const choose = (active) => update({ ...current.current, active });
   const change = (key, value) => {
     const { active, pens } = current.current;
-    update({ active, pens: { ...pens, [active]: { ...pens[active], [key]: value } } });
+    update({ ...current.current, pens: { ...pens, [active]: { ...pens[active], [key]: value } } });
   };
   if (!editor || !settings || !panel || (!visible && !selected.length)) return null;
   if (selected.length) {
