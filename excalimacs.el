@@ -718,7 +718,8 @@ Bundle names carry no content hash, so browsers must revalidate them."
   (when (and excalimacs-minor-mode
              (not excalimacs--refresh-timer)
              (or (seq-some (lambda (overlay)
-                             (<= (overlay-end overlay) (overlay-start overlay)))
+                             (or (not (overlay-buffer overlay))
+                                 (<= (overlay-end overlay) (overlay-start overlay))))
                            excalimacs--overlays)
                  (when-let* ((template (excalimacs--template))
                              (opening (plist-get template :begin)))
@@ -756,11 +757,11 @@ Bundle names carry no content hash, so browsers must revalidate them."
 (defun excalimacs--drawing-before-point ()
   "Return the displayed drawing directly before point."
   (or (excalimacs--drawing-at (point))
-      (seq-find (lambda (overlay) (= (overlay-end overlay) (point)))
+      (seq-find (lambda (overlay) (equal (overlay-end overlay) (point)))
                 excalimacs--overlays)
       (and (> (point) (point-min))
            (eq (char-before) ?\n)
-           (seq-find (lambda (overlay) (= (overlay-end overlay) (1- (point))))
+           (seq-find (lambda (overlay) (equal (overlay-end overlay) (1- (point))))
                      excalimacs--overlays))))
 
 (defun excalimacs-delete-backward ()
