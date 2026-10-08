@@ -269,7 +269,16 @@ assert.equal(await page.locator('[data-openpopup="elementBackground"]').isVisibl
 assert.equal(await page.getByRole('radiogroup',{name:'Pen stroke width'}).count(),0);
 await page.keyboard.press('p');
 await page.getByRole('toolbar',{name:'Pens'}).waitFor();
-await page.setViewportSize({width:390,height:844});await page.getByRole('toolbar',{name:'Pens'}).waitFor({state:'visible'});assert.equal(await page.getByRole('toolbar',{name:'Pens'}).isVisible(),true);
+await page.setViewportSize({width:390,height:844});
+await page.getByRole('toolbar',{name:'Pens'}).waitFor({state:'hidden'});
+assert.equal(await page.locator('.compact-shape-actions .pens-plugin').count(),0);
+await page.locator('.compact-action-button[title="Stroke"]').click();
+await page.locator('.properties-content').getByRole('toolbar',{name:'Pens'}).waitFor();
+await page.getByRole('button',{name:'Highlighter',exact:true}).click();
+await page.getByRole('button',{name:'Pen settings',exact:true}).click();
+await page.getByRole('slider',{name:'Pen thinning',exact:true}).waitFor();
+await page.locator('.compact-action-button[title="Stroke"]').click();
+await page.getByRole('toolbar',{name:'Pens'}).waitFor({state:'hidden'});
 await page.evaluate(()=>window.__waitForPenSettings());
 emacs('(setq excalimacs-plugins nil)');await page.reload();await page.waitForFunction(()=>window.__api);await page.waitForTimeout(500);assert.equal(await page.getByRole('toolbar',{name:'Pens'}).count(),0);
 assert.deepEqual(errors,[]);console.log('Pens browser checks passed');

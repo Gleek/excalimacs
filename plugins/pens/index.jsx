@@ -67,7 +67,7 @@ export function usePens(editor, saved, saveSettings) {
     const dispose = createPenTool(editor, container, () => current.current);
     // No upstream panel extension slot: isolate the DOM attachment here.
     const locatePanel = () => setPanel([...container.querySelectorAll(
-      ".selected-shape-actions-container div.selected-shape-actions, .selected-shape-actions-container .compact-shape-actions, .mobile-shape-actions")]
+      ".selected-shape-actions-container div.selected-shape-actions, .properties-content .selected-shape-actions")]
       .find((element) => element.offsetParent !== null) ?? null);
     const observer = new MutationObserver(locatePanel);
     observer.observe(container, { childList: true, subtree: true });

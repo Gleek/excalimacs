@@ -11,13 +11,7 @@
 
 .pens-plugin { position: relative; min-width: 0; pointer-events: auto; }
 .pens-plugin legend { font-size: 12px; }
-.mobile-shape-actions .pens-plugin { border: 0; }
-.mobile-shape-actions .pens-toolbar { display: flex; }
-.mobile-shape-actions .pens-plugin legend { display: none; }
 .pen-settings { color: var(--text-primary-color, #222); }
-.mobile-shape-actions .pen-settings { position: absolute; bottom: calc(100% + 8px); right: 0;
-  width: 190px; padding: 12px; border-radius: 8px; background: var(--island-bg-color, white);
-  box-shadow: 0 2px 12px #0003; }
 .pen-settings label { display: flex; align-items: center; justify-content: space-between;
   gap: 8px; margin: 8px 0; font-size: 12px; text-transform: capitalize; }
 .pen-settings input[type=range] { width: 110px; }
