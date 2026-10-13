@@ -7,18 +7,19 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'simple-httpd)
+(require 'excalimacs-httpd)
 (require 'tabulated-list)
 (require 'subr-x)
 
 (defvar excalimacs--sessions)
-(defvar excalimacs--owns-server)
 (defvar excalimacs-allow-remote)
 (declare-function excalimacs--remote-session-p "excalimacs" (session))
 (declare-function excalimacs--remote-enabled-p "excalimacs" ())
 (declare-function excalimacs--clear-drawing "excalimacs" (path))
 (declare-function excalimacs--revoke-session "excalimacs" (token))
 (declare-function excalimacs--start "excalimacs" (&optional network))
+(declare-function excalimacs--server-running-p "excalimacs" ())
+(declare-function excalimacs--serving-p "excalimacs" ())
 (declare-function excalimacs-stop "excalimacs" ())
 
 (defcustom excalimacs-debug t
@@ -57,7 +58,7 @@ or drawing contents.  Only the latest 300 entries are retained."
 
 (defun excalimacs--httpd-log (log item)
   "Capture simple-httpd ITEM safely while Excalimacs owns the server."
-  (if (not excalimacs--owns-server)
+  (if (not (excalimacs--serving-p))
       (funcall log item)
     (pcase (car item)
       ((or 'connection 'close 'start 'stop)
@@ -69,7 +70,7 @@ or drawing contents.  Only the latest 300 entries are retained."
 (defun excalimacs--log-response (send proc mime status &rest headers)
   "Log the status and byte count of a response sent by SEND."
   (let ((bytes (httpd--buffer-size))
-        (request excalimacs--request))
+        (request (and (excalimacs--serving-p) excalimacs--request)))
     (prog1 (apply send proc mime status headers)
       (when request
         (excalimacs--log "HTTP -> %s %s | %s | %s bytes"
@@ -79,39 +80,33 @@ or drawing contents.  Only the latest 300 entries are retained."
 (advice-add 'httpd--log :around #'excalimacs--httpd-log)
 (advice-add 'httpd-send-header :around #'excalimacs--log-response)
 
-(defun excalimacs--isolate-request (handle &rest args)
-  "Run HANDLE with ARGS outside any pending HTTP response buffer.
-Sending large assets can run another request's timer.  simple-httpd
-otherwise reuses the interrupted response buffer, corrupting both replies."
-  (if excalimacs--owns-server
-      (let* ((excalimacs--request (cadr args))
-             ;; Live edits arrive several times a second while drawing.
-             (excalimacs-debug (and excalimacs-debug
-                                    (not (equal (cadar excalimacs--request) "/api/broadcast"))))
-             (body (cadr (assoc "Content" excalimacs--request)))
-             (proc (car args))
-             (host (and (processp proc) (car (process-contact proc))))
-             (session (gethash (cadr (assoc "X-Editor-Token" excalimacs--request))
-                               excalimacs--sessions))
-             (origin (or (if (stringp session) "http://127.0.0.1:"
-                           (plist-get session :origin))
-                         (cadr (assoc "Origin" excalimacs--request))))
-             (excalimacs--remote-request-p
-              (if origin
-                  (not (string-match-p
-                        "\\`https?://\\(?:127\\.[0-9.]+\\|localhost\\|\\[::1\\]\\)\\(?::\\|/\\|\\'\\)"
-                        origin))
-                (and host (not (or (string-prefix-p "127." host)
-                                  (member host '("::1" "localhost"))))))))
-        (excalimacs--log "HTTP <- %s %s | %s | %s bytes"
-                        (caar excalimacs--request)
-                        (car (split-string (or (cadar excalimacs--request) "") "[?#]"))
-                        (or host "internal")
-                        (if (stringp body) (string-bytes body) 0))
-        (with-temp-buffer (apply handle args)))
+(defun excalimacs--log-request (handle &rest args)
+  "Log the Excalimacs request in ARGS, then call HANDLE."
+  (let* ((excalimacs--request (cadr args))
+	 ;; Live edits arrive several times a second while drawing.
+	 (excalimacs-debug (and excalimacs-debug
+				(not (equal (cadar excalimacs--request) "/api/broadcast"))))
+	 (body (cadr (assoc "Content" excalimacs--request)))
+	 (proc (car args))
+	 (host (and (processp proc) (car (process-contact proc))))
+	 (session (gethash (cadr (assoc "X-Editor-Token" excalimacs--request))
+                           excalimacs--sessions))
+	 (origin (or (if (stringp session) "http://127.0.0.1:"
+                       (plist-get session :origin))
+                     (cadr (assoc "Origin" excalimacs--request))))
+	 (excalimacs--remote-request-p
+          (if origin
+              (not (string-match-p
+                    "\\`https?://\\(?:127\\.[0-9.]+\\|localhost\\|\\[::1\\]\\)\\(?::\\|/\\|\\'\\)"
+                    origin))
+            (and host (not (or (string-prefix-p "127." host)
+                               (member host '("::1" "localhost"))))))))
+    (excalimacs--log "HTTP <- %s %s | %s | %s bytes"
+                     (caar excalimacs--request)
+                     (car (split-string (or (cadar excalimacs--request) "") "[?#]"))
+                     (or host "internal")
+                     (if (stringp body) (string-bytes body) 0))
     (apply handle args)))
-
-(advice-add 'httpd--handle-request :around #'excalimacs--isolate-request)
 
 (define-derived-mode excalimacs-diagnostics-mode tabulated-list-mode "Excalimacs"
   "Inspect drawing sessions and control the Excalimacs server.
@@ -140,7 +135,7 @@ Press g to refresh or d to revoke the session at point."
         (excalimacs--header-toggle (excalimacs--remote-enabled-p)
                                   #'excalimacs-diagnostics-toggle-remote)
         ", Server: "
-        (excalimacs--header-toggle (and excalimacs--owns-server (httpd-running-p))
+        (excalimacs--header-toggle (excalimacs--server-running-p)
                                   #'excalimacs-diagnostics-toggle-server)))
 
 (defun excalimacs--diagnostics-refresh (&rest _ignored)
@@ -190,7 +185,7 @@ Press g to refresh or d to revoke the session at point."
 (defun excalimacs-diagnostics-toggle-server ()
   "Toggle the server, starting on loopback or stopping all sessions."
   (interactive)
-  (if (and excalimacs--owns-server (httpd-running-p))
+  (if (excalimacs--server-running-p)
       (excalimacs-stop)
     (excalimacs--start))
   (excalimacs--diagnostics-refresh))

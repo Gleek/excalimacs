@@ -9,7 +9,7 @@
 
 (require 'cl-lib)
 (require 'json)
-(require 'simple-httpd)
+(require 'excalimacs-httpd)
 (require 'subr-x)
 (require 'url)
 (require 'org-id)
@@ -87,7 +87,9 @@ when the drawing finishes, so this also bounds how long it waits."
   :type 'number)
 
 (defvar excalimacs--sessions (make-hash-table :test #'equal))
-(defvar excalimacs--owns-server nil)
+(declare-function excalimacs--log-request "excalimacs-diagnostics" (handle &rest args))
+
+(defvar excalimacs--server nil)
 (defvar-local excalimacs--overlays nil)
 (defvar-local excalimacs--refresh-timer nil)
 (defvar excalimacs-minor-mode)
@@ -381,7 +383,7 @@ BASE-HASH is nil only when creating a new file."
   "Call SEND with PROC, MIME, STATUS and HEADERS, marking files no-cache.
 Bundle names carry no content hash, so browsers must revalidate them."
   (apply send proc mime status
-         (if (and excalimacs--owns-server (plist-member headers :ETag))
+         (if (and (excalimacs--serving-p) (plist-member headers :ETag))
              (append headers '(:Cache-Control "no-cache"))
            headers)))
 
@@ -399,7 +401,7 @@ Bundle names carry no content hash, so browsers must revalidate them."
         (session (or (gethash (cadr (assoc "X-Editor-Token" request))
                              excalimacs--sessions)
                      (excalimacs--library-import-session request)))
-        (port (process-contact httpd--server :service)))
+        (port (process-contact excalimacs--server :service)))
     (or (not origin)
         (equal origin (if (stringp session)
                           (format "http://127.0.0.1:%s" port)
@@ -1104,34 +1106,43 @@ Return nil while pending, otherwise `ok', `conflict' or `error'."
                       excalimacs--agent-queue))
            excalimacs--agent-queue))
 
+(defun excalimacs--server-running-p ()
+  "Return non-nil if the Excalimacs listener is running."
+  (and excalimacs--server (process-live-p excalimacs--server)))
+
+(defun excalimacs--serving-p ()
+  "Return non-nil inside a callback for the Excalimacs listener."
+  (and excalimacs--server
+       (eq excalimacs-httpd-current-server excalimacs--server)))
+
+(defun excalimacs--stop-listener ()
+  "Stop only the Excalimacs listener and its client connections."
+  (excalimacs-httpd-stop excalimacs--server)
+  (setq excalimacs--server nil))
+
+(defun excalimacs--start-listener (host)
+  "Listen on HOST, preserving the port and drawing sessions when restarting."
+  (let ((port (if (excalimacs--server-running-p)
+                  (process-contact excalimacs--server :service) 0)))
+    (excalimacs--stop-listener)
+    (setq excalimacs--server
+          (excalimacs-httpd-start excalimacs-dist-directory :host host :port port
+                                 :handler #'excalimacs--log-request)))
+  (excalimacs--log "Server listening on %s:%s" host
+                   (process-contact excalimacs--server :service))
+  (excalimacs--diagnostics-schedule-refresh))
+
 (defun excalimacs--start (&optional network)
   "Start the HTTP server, allowing LAN connections when NETWORK is non-nil."
   (when (and network (not excalimacs-allow-remote))
     (user-error "Enable excalimacs-allow-remote to use remote open actions"))
   (unless (file-exists-p (expand-file-name "index.html" excalimacs-dist-directory))
     (error "Build Excalimacs first: npm run build"))
-  (if (httpd-running-p)
-      (unless (and excalimacs--owns-server
-                   (member httpd-host '("127.0.0.1" "0.0.0.0"))
-                   (equal (file-truename httpd-root)
-                          (file-truename excalimacs-dist-directory)))
-        (error "simple-httpd is already serving another site"))
-    (setq httpd-host (if network "0.0.0.0" "127.0.0.1")
-          httpd-port 0
-          httpd-root excalimacs-dist-directory
-          httpd-listings nil)
-    (let ((httpd-log-buffer nil)) (httpd-start))
-    (setq excalimacs--owns-server t)
-    (excalimacs--log "Server started %s:%s" httpd-host (process-contact httpd--server :service))
-    (excalimacs--diagnostics-schedule-refresh))
-  (when (and network (equal httpd-host "127.0.0.1"))
-    ;; Preserve URLs and session authorizations when enabling LAN access.
-    (setq httpd-port (process-contact httpd--server :service)
-          httpd-host "0.0.0.0")
-    (httpd-start)
-    (excalimacs--log "LAN listening enabled on port %s" httpd-port)
-    (excalimacs--diagnostics-schedule-refresh))
-  (process-contact httpd--server :service))
+  (unless (excalimacs--server-running-p)
+    (excalimacs--start-listener (if network "0.0.0.0" "127.0.0.1")))
+  (when (and network (equal (process-contact excalimacs--server :host) "127.0.0.1"))
+    (excalimacs--start-listener "0.0.0.0"))
+  (process-contact excalimacs--server :service))
 
 (defun excalimacs--network-address ()
   "Return the configured or detected LAN IPv4 address."
@@ -1151,8 +1162,8 @@ Return nil while pending, otherwise `ok', `conflict' or `error'."
 (defun excalimacs--remote-enabled-p ()
   "Return non-nil if remote access is permitted or already listening."
   (or excalimacs-allow-remote
-      (and excalimacs--owns-server (httpd-running-p)
-           (equal httpd-host "0.0.0.0"))))
+      (and (excalimacs--server-running-p)
+           (equal (process-contact excalimacs--server :host) "0.0.0.0"))))
 
 (defun excalimacs--clear-drawing (path)
   "Revoke every session for drawing PATH, keeping the file."
@@ -1171,14 +1182,11 @@ Return nil while pending, otherwise `ok', `conflict' or `error'."
   (dolist (socket excalimacs--sockets)
     (when (equal (nth 1 socket) token) (delete-process (car socket))))
   (excalimacs--diagnostics-schedule-refresh)
-  (when (and excalimacs--owns-server (httpd-running-p)
-             (equal httpd-host "0.0.0.0")
+  (when (and (excalimacs--server-running-p)
+             (equal (process-contact excalimacs--server :host) "0.0.0.0")
              (not (cl-loop for session being the hash-values of excalimacs--sessions
                            thereis (excalimacs--remote-session-p session))))
-    (setq httpd-port (process-contact httpd--server :service)
-          httpd-host "127.0.0.1")
-    (httpd-start)
-    (excalimacs--log "Server restricted to loopback on port %s" httpd-port)))
+    (excalimacs--start-listener "127.0.0.1")))
 
 (defun excalimacs--show-qr (url token)
   "Display URL as a QR code, with a button to revoke TOKEN."
@@ -1293,9 +1301,7 @@ TARGET, when non-nil, is an element=ID or group=ID viewport target."
 (defun excalimacs-stop ()
   "Stop the Excalimacs server and forget its drawing sessions."
   (interactive)
-  (when (and excalimacs--owns-server (httpd-running-p))
-    (httpd-stop))
-  (setq excalimacs--owns-server nil)
+  (excalimacs--stop-listener)
   (clrhash excalimacs--sessions)
   (excalimacs--log "Server stopped; all drawing access cleared")
   (excalimacs--diagnostics-schedule-refresh))
