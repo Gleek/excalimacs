@@ -26,7 +26,8 @@
   "Log HTTP traffic and drawing bridge activity in diagnostics.
 Logs contain request paths, status codes and byte counts, without tokens
 or drawing contents.  Only the latest 300 entries are retained."
-  :type 'boolean)
+  :type 'boolean
+  :group 'excalimacs)
 
 (defvar excalimacs--logs nil)
 (defvar excalimacs--diagnostics-timer nil)

@@ -7,8 +7,10 @@
     "build": "vite build",
     "upgrade:excalidraw": "npm install --save-exact @excalidraw/excalidraw@next && npm run build",
     "test": "emacs -Q --batch -L . -L ../emacs-web-server.github.skeeto -l excalimacs.el -l tests/excalimacs-test.el -f ert-run-tests-batch-and-exit",
-    "test:browser": "node tests/agent-animation-browser.cjs",
-    "test:pens": "node tests/pens-browser.cjs"
+    "test:unit": "node --test tests/*.test.js",
+    "test:browser": "node scripts/test-browser.mjs",
+    "test:pens": "node scripts/test-browser.mjs pens",
+    "test:all": "npm test && npm run test:unit && npm run test:browser"
   },
   "dependencies": {
     "@excalidraw/excalidraw": "0.18.0-1118751",
@@ -18,6 +20,7 @@
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "playwright": "1.63.0",
     "vite": "^7.1.0"
   }
 }

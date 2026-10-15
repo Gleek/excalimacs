@@ -4,7 +4,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const { execFileSync, spawn } = require('node:child_process');
 const assert = require('node:assert/strict');
 const { resolve, join } = require('node:path');
-const { mkdtempSync } = require('node:fs');
+const { mkdtempSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const ROOT=resolve(__dirname, '..');
 const scratch=mkdtempSync(join(tmpdir(), 'excalimacs-animation-'));
@@ -22,7 +22,8 @@ const cli=(op,payload,immediate=false)=>new Promise((resolve,reject)=>{
  const server=await createServer({root:ROOT,server:{port:5199,host:'127.0.0.1',proxy:{'/api':{target,ws:true,changeOrigin:true,configure(proxy){
   proxy.on('proxyReq',req=>req.setHeader('Origin',target));proxy.on('proxyReqWs',req=>req.setHeader('Origin',target));
  }}}}});await server.listen();
- const browser=await chromium.launch();let errors=[];
+ const browser=await chromium.launch(process.env.CHROMIUM_PATH
+  ? {executablePath:process.env.CHROMIUM_PATH} : {});let errors=[];
  try {
   const pages=[];
   for(let i=0;i<2;i++){
@@ -110,6 +111,17 @@ const cli=(op,payload,immediate=false)=>new Promise((resolve,reject)=>{
   await b.waitForFunction(id=>window.__api.getSceneElements().some(e=>e.type==='text'&&e.containerId===id&&e.originalText==='Updated'),target.id);
   assert.ok(await b.evaluate(()=>window.__overrides.every(o=>!o.ids.length)),'reduced motion skips animation');
   console.log('label update and reduced-motion preference passed');
+  // Work already dispatched to this tab must still be cancellable while queued.
+  const holding=cli('add',[{id:'holding-'+Date.now(),type:'rectangle',x:100,y:100,width:600,height:400,
+   label:{text:'Hold the browser queue while a second operation is cancelled.'}}]);
+  await a.waitForFunction(()=>document.querySelector('.agent-animation-element'));
+  const cancelledId='never-added-'+Date.now(),request=join(scratch,'cancel-request');
+  writeFileSync(request,`add\n${DRAW}\n${JSON.stringify([{id:cancelledId,type:'rectangle',x:0,y:0}])}`);
+  const operation=JSON.parse(emacs(`(excalimacs-agent-submit ${JSON.stringify(request)})`));
+  assert.equal(emacs(`(excalimacs-agent-cancel ${JSON.stringify(operation)})`),'cancelled');
+  await holding;
+  assert.ok(!(await cli('scene')).result.some(element=>element.id===cancelledId),'cancelled browser-queued edit never runs');
+  console.log('dispatched operation cancellation passed');
   assert.deepEqual(errors,[]);console.log('no browser errors');
  }finally{await browser.close();await server.close();execFileSync('trash',[scratch]);}
 })().catch(e=>{console.error(e);process.exitCode=1;});

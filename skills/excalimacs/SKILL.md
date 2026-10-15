@@ -35,6 +35,8 @@ If no editor tab has it open, Excalimacs opens one.
    Nothing was applied. The output has `changed` (`{property: {was, now}}`)
    and `current`. Combine both intents, keep their other edits, and retry
    with `current.version`. Never overwrite a person's edit blindly.
+   Deletion requires the complete version to match, including rotation,
+   bindings and other properties that updates leave alone.
 5. Look at the `.excalidraw.png` file as an image to check the result. It
    is saved before each command returns.
 

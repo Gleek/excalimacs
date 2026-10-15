@@ -17,7 +17,10 @@ const hashParams = new URLSearchParams(location.hash.slice(1));
 const queryParams = new URLSearchParams(location.search);
 const libraryToken = queryParams.get("libraryToken");
 let token = queryParams.get("token");
-if (!token && libraryToken) token = localStorage.getItem(`excalimacs-return:${libraryToken}`);
+if (!token && libraryToken) {
+  try { token = localStorage.getItem(`excalimacs-return:${libraryToken}`); }
+  catch { /* A scoped token still permits importing without browser storage. */ }
+}
 if (token && !queryParams.has("token")) {
   queryParams.set("token", token);
   history.replaceState(null, "", `${location.pathname}?${queryParams}${location.hash}`);
@@ -147,9 +150,13 @@ function App() {
       .catch((failure) => setError(`Plugins could not be loaded: ${failure.message}`));
     api("GET", null, "/api/library-token")
       .then(({ token: scoped }) => {
-        localStorage.setItem(`excalimacs-return:${scoped}`, token);
+        try { localStorage.setItem(`excalimacs-return:${scoped}`, token); }
+        catch { /* The library can return to a separate import-only page. */ }
         setLibraryReturnUrl(`${location.origin}${location.pathname}?libraryToken=${scoped}`);
-      }).catch((failure) => setLibraryError(`Library link could not be prepared: ${failure.message}`));
+      }).catch((failure) => {
+        setLibraryError(`Library link could not be prepared: ${failure.message}`);
+        setLibraryReturnUrl("");
+      });
   }, []);
 
   const refreshLibrary = useCallback(async () => {
@@ -347,6 +354,8 @@ function App() {
         agentRef.current = agentRef.current.then(async () => {
           await syncRef.current();
           for (const op of ops) {
+            const { run } = await api("POST", { id: op.id, start: true }, "/api/agent");
+            if (!run) continue;
             const before = new Map(excalidrawAPI.getSceneElements().map((element) =>
               [element.id, element]));
             const result = await runAgentOp(excalidrawAPI, commit, op, () => {
@@ -624,7 +633,7 @@ function App() {
 
   if (importOnly) return <main className="message">{importResult}</main>;
   if (error && !document) return <main className="message">Could not open drawing: {error}</main>;
-  if (!document || !libraryItems || !libraryReturnUrl)
+  if (!document || !libraryItems || libraryReturnUrl === null)
     return <main className="message">Loading drawing and library…{libraryError}{importError}</main>;
   window.document.title = `${status === "Saved" ? "" : "● "}${document.name.split("/").at(-1)}`;
   const theme = themePreference === "system" ? (systemDark ? "dark" : "light") : themePreference;

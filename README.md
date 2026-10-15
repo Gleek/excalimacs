@@ -124,8 +124,8 @@ drawing. Opening it shows the drawing focused on the linked element or group.
 ### Remove a drawing
 
 Press Delete at the start of a preview or Backspace just after it to remove
-its block from the buffer. By default, Excalimacs asks whether to delete the
-drawing file too.
+its block from the buffer. By default, Excalimacs asks whether to permanently
+delete the drawing file too.
 
 ### Draw with agents
 
@@ -332,12 +332,17 @@ EMACSLOADPATH=/path/to/simple-httpd: emacs -Q --batch -L . -l excalimacs.el -l t
 
 Or use the npm wrapper: `EMACSLOADPATH=/path/to/simple-httpd: npm test`.
 
-With Emacs running and Playwright Chromium installed, test CLI animations and
-concurrent editing across two tabs with `npm run test:browser`.
-Set `PLAYWRIGHT_MODULE` to a Playwright module path if it is installed elsewhere.
-The test uses a temporary drawing and moves it to Trash afterward.
+Run every suite with `npm run test:all`: Emacs tests, JavaScript unit tests,
+and browser tests for animations, concurrent editing, pens, links and editor
+regressions. `npm run test:browser` runs just the browser suites;
+`npm run test:pens` runs only pens.
 
-These cover stale-save rejection, Unicode request handling, and Org link creation. Full browser-to-Emacs integration has been exercised manually.
+Browser tests use the Playwright development dependency. Install its browser
+once with `npx playwright install chromium`. Set `PLAYWRIGHT_MODULE` to a
+Playwright module path if installed elsewhere, and `CHROMIUM_PATH` to use an
+existing Chromium or Chrome executable. They start an isolated Emacs daemon
+with temporary settings and drawings, then stop it and move temporary files
+to Trash. Your running Emacs and saved pen settings are left alone.
 
 Excalimacs uses Excalidraw's `next` development release from npm, with an exact version pinned in `package.json` and `package-lock.json`. It exports the command palette directly, so no bundle patch is needed.
 

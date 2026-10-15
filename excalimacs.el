@@ -14,6 +14,8 @@
 (require 'url)
 (require 'org-id)
 
+(defvar url-http-response-status)
+
 (defgroup excalimacs nil "Local Excalidraw editor." :group 'applications)
 
 (defcustom excalimacs-plugins nil
@@ -47,7 +49,7 @@ against that buffer's `default-directory'."
   :type 'integer)
 
 (defcustom excalimacs-delete-file 'ask
-  "Whether deleting a displayed drawing also deletes its PNG file.
+  "Whether deleting a displayed drawing permanently deletes its PNG file.
 The value `ask' prompts before deleting; nil keeps the file."
   :type '(choice (const :tag "Ask" ask)
                  (const :tag "Delete automatically" t)
@@ -143,6 +145,9 @@ More specific major modes take precedence over their parents."
 (defvar excalimacs--sockets nil "Editor WebSockets as (PROCESS TOKEN TAB PATH).")
 (defvar excalimacs--agent-queue (make-hash-table :test #'equal))
 (defvar excalimacs--agent-results (make-hash-table :test #'equal))
+(defvar excalimacs--agent-operations (make-hash-table :test #'equal)
+  "Active agent operations as ID -> (PATH . STATE).
+STATE is pending, running, or abandoned after a running command times out.")
 
 (defun excalimacs--file-hash (path)
   "Return PATH's hash, or nil when it is missing, cached by mtime and size."
@@ -258,13 +263,10 @@ More specific major modes take precedence over their parents."
         found)))
 
 (httpd-servlet api/library application/json (_path _query request)
-  (let* ((method (caar request))
-         (session (if (equal method "POST")
-                      (excalimacs--library-import-session request)
-                    (excalimacs--session-path request))))
+  (let ((method (caar request)))
     (condition-case err
         (cond
-         ((not session) (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         ((excalimacs--reject-request request '("GET" "POST" "PUT") t))
          ((equal method "GET")
           (let* ((path (excalimacs--library-path))
                  (contents (and (file-exists-p path) (excalimacs--read path)))
@@ -276,10 +278,7 @@ More specific major modes take precedence over their parents."
              200 `(("library" . ,library)
                    ("hash" . ,(if contents (excalimacs--hash contents) :null))))))
          ((equal method "POST")
-          (unless (excalimacs--allowed-origin-p request) (error "Forbidden"))
-          (let* ((data (json-parse-string
-                        (decode-coding-string (cadr (assoc "Content" request)) 'utf-8)
-                        :object-type 'hash-table))
+          (let* ((data (excalimacs--request-json request))
                  (name (gethash "name" data))
                  (address (gethash "url" data))
                  (contents (if address (excalimacs--download-library address)
@@ -297,14 +296,8 @@ More specific major modes take precedence over their parents."
              (expand-file-name name excalimacs-library-directory)
              (encode-coding-string contents 'utf-8))
             (excalimacs--json-reply 200 '(("ok" . t)))))
-         ((not (equal method "PUT"))
-          (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
-         ((not (excalimacs--allowed-origin-p request))
-          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
          (t
-          (let* ((data (json-parse-string
-                        (decode-coding-string (cadr (assoc "Content" request)) 'utf-8)
-                        :object-type 'hash-table))
+          (let* ((data (excalimacs--request-json request))
                  (base (gethash "baseHash" data))
                  (contents (gethash "text" data))
                  (path (excalimacs--library-path)))
@@ -379,6 +372,32 @@ BASE-HASH is nil only when creating a new file."
     (insert (json-serialize object)))
   (httpd-send-header t "application/json" status :Cache-Control "no-store"))
 
+(defun excalimacs--request-json (request &optional limit list-arrays)
+  "Parse REQUEST's UTF-8 JSON body, enforcing byte LIMIT when provided.
+LIST-ARRAYS requests lists instead of vectors for JSON arrays."
+  (let ((body (cadr (assoc "Content" request))))
+    (when (and limit (> (string-bytes body) limit))
+      (error "Request body too large"))
+    (json-parse-string (decode-coding-string body 'utf-8)
+                       :object-type 'hash-table
+                       :array-type (if list-arrays 'list 'array))))
+
+(defun excalimacs--reject-request (request methods &optional library-import)
+  "Reply to an unauthorized REQUEST or a method outside METHODS.
+Return non-nil if rejected.  LIBRARY-IMPORT permits scoped import tokens."
+  (let* ((method (caar request))
+         (session (if (and library-import (equal method "POST"))
+                      (excalimacs--library-import-session request)
+                    (excalimacs--session-path request)))
+         (failure (cond ((not session) '(403 "Forbidden"))
+                        ((not (member method methods)) '(405 "Method not allowed"))
+                        ((and (not (equal method "GET"))
+                              (not (excalimacs--allowed-origin-p request)))
+                         '(403 "Forbidden")))))
+    (when failure
+      (excalimacs--json-reply (car failure) `(("error" . ,(cadr failure))))
+      t)))
+
 (defun excalimacs--revalidate-files (send proc mime status &rest headers)
   "Call SEND with PROC, MIME, STATUS and HEADERS, marking files no-cache.
 Bundle names carry no content hash, so browsers must revalidate them."
@@ -400,19 +419,16 @@ Bundle names carry no content hash, so browsers must revalidate them."
   (let ((origin (cadr (assoc "Origin" request)))
         (session (or (gethash (cadr (assoc "X-Editor-Token" request))
                              excalimacs--sessions)
-                     (excalimacs--library-import-session request)))
-        (port (process-contact excalimacs--server :service)))
+                     (excalimacs--library-import-session request))))
     (or (not origin)
         (equal origin (if (stringp session)
-                          (format "http://127.0.0.1:%s" port)
+                          (format "http://127.0.0.1:%s"
+                                  (process-contact excalimacs--server :service))
                         (plist-get session :origin))))))
 
 (httpd-servlet api/library-token application/json (_path _query request)
   (cond
-   ((not (excalimacs--session-path request))
-    (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
-   ((not (equal (caar request) "GET"))
-    (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
+   ((excalimacs--reject-request request '("GET")))
    (t
     (excalimacs--json-reply
      200 `(("token" . ,(secure-hash 'sha256
@@ -427,20 +443,13 @@ Bundle names carry no content hash, so browsers must revalidate them."
                            (json-parse-string (excalimacs--read path))
                          (make-hash-table :test #'equal))))
         (cond
-         ((not (excalimacs--session-path request))
-          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         ((excalimacs--reject-request request '("GET" "PUT")))
          ((equal method "GET")
           (excalimacs--json-reply
            200 `(("plugins" . ,(vconcat (mapcar #'symbol-name excalimacs-plugins)))
                  ("settings" . ,settings))))
-         ((not (equal method "PUT"))
-          (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
-         ((not (excalimacs--allowed-origin-p request))
-          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
          (t
-          (let* ((body (decode-coding-string (cadr (assoc "Content" request)) 'utf-8))
-                 (_ (when (> (length body) 16384) (error "Plugin settings too large")))
-                 (data (json-parse-string body))
+          (let* ((data (excalimacs--request-json request 16384))
                  (name (gethash "name" data))
                  (value (gethash "settings" data)))
             (unless (and (equal name "pens") (hash-table-p value))
@@ -456,7 +465,7 @@ Bundle names carry no content hash, so browsers must revalidate them."
         (method (caar request)))
     (condition-case err
         (cond
-         ((not path) (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         ((excalimacs--reject-request request '("GET" "PUT")))
          ((and (equal method "GET") (assoc "hash" query))
           (excalimacs--json-reply 200 `(("hash" . ,(or (excalimacs--file-hash path) :null)))))
          ((equal method "GET")
@@ -479,10 +488,6 @@ Bundle names carry no content hash, so browsers must revalidate them."
                               text (json-serialize (excalimacs--hash text))
                               (json-serialize (file-name-nondirectory path))))
               (httpd-send-header t "application/json" 200 :Cache-Control "no-store")))))
-         ((not (equal method "PUT"))
-          (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
-         ((not (excalimacs--allowed-origin-p request))
-          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
          ((string-suffix-p ".png" path)
           (let ((bytes (cadr (assoc "Content" request)))
                 (base (cadr (assoc "X-Base-Hash" request))))
@@ -492,9 +497,7 @@ Bundle names carry no content hash, so browsers must revalidate them."
               (excalimacs--notify path)
               (excalimacs--json-reply 200 `(("hash" . ,hash))))))
          (t
-          (let* ((data (json-parse-string (decode-coding-string
-                                          (cadr (assoc "Content" request)) 'utf-8)
-                                          :object-type 'hash-table))
+          (let* ((data (excalimacs--request-json request))
                  (base (gethash "baseHash" data))
                  (text (gethash "text" data)))
             (unless (and (stringp base) (stringp text))
@@ -511,15 +514,10 @@ Bundle names carry no content hash, so browsers must revalidate them."
   (let ((path (excalimacs--session-path request)))
     (condition-case err
         (cond
-         ((not path) (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
-         ((not (equal (caar request) "POST"))
-          (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
-         ((not (excalimacs--allowed-origin-p request))
-          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         ((excalimacs--reject-request request '("POST")))
          (t
           (when (string-suffix-p ".png" path)
-            (let* ((data (json-parse-string
-                          (decode-coding-string (cadr (assoc "Content" request)) 'utf-8)))
+            (let* ((data (excalimacs--request-json request))
                    (text (gethash "text" data)))
               (unless text
                 (error "Refresh the editor tab to load the updated app opener"))
@@ -540,9 +538,7 @@ Bundle names carry no content hash, so browsers must revalidate them."
 (httpd-servlet api/link application/json (_path _query request)
   (let ((path (excalimacs--session-path request)))
     (cond
-     ((not path) (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
-     ((not (equal (caar request) "GET"))
-      (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
+     ((excalimacs--reject-request request '("GET")))
      (t (excalimacs--json-reply
          200 `(("link" . ,(concat "excalimacs:" (url-hexify-string path)))))))))
 
@@ -550,14 +546,9 @@ Bundle names carry no content hash, so browsers must revalidate them."
   (let ((path (excalimacs--session-path request)))
     (condition-case err
         (cond
-         ((not path) (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
-         ((not (equal (caar request) "POST"))
-          (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
-         ((not (excalimacs--allowed-origin-p request))
-          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         ((excalimacs--reject-request request '("POST")))
          (t
-          (let* ((data (json-parse-string
-                        (decode-coding-string (cadr (assoc "Content" request)) 'utf-8)))
+          (let* ((data (excalimacs--request-json request))
                  (link (gethash "link" data)))
             (unless (and (stringp link) (not (string-empty-p link)))
               (error "Invalid link"))
@@ -594,7 +585,8 @@ Bundle names carry no content hash, so browsers must revalidate them."
                       :end (format "%s /excalidraw%s" start
                                    (if (string-empty-p end) "" (concat " " end)))
                       :text-prefix (concat start " ")
-                      :text-suffix (if (string-empty-p end) "" (concat " " end)))))
+                      :text-suffix (if (string-empty-p end) "" (concat " " end))
+                      :comment-end end)))
           template)))))
 
 (defun excalimacs--text-p (template)
@@ -607,14 +599,25 @@ Bundle names carry no content hash, so browsers must revalidate them."
   "Return LINES formatted as TEMPLATE's searchable text."
   (if (excalimacs--text-p template)
       (let ((prefix (or (plist-get template :text-prefix) ""))
-            (suffix (or (plist-get template :text-suffix) "")))
+            (suffix (or (plist-get template :text-suffix) ""))
+            (closing (or (plist-get template :comment-end)
+                         (and (equal (plist-get template :end) "-->") "-->"))))
         (mapconcat (lambda (line)
                      ;; Colon-prefixed lines are Org fixed-width text, which
                      ;; hides links from Org's parser and org-roam.
                      (when (derived-mode-p 'org-mode)
-                       (setq line (string-remove-prefix ": " line)))
+                       (setq line (string-remove-prefix ": " line))
+                       (when (string-match-p "\\`[ \t]*\\(?:#\\+\\|\\*\\)" line)
+                         (setq line (concat "," line))))
+                     (when (and closing (> (length closing) 1))
+                       (setq line (replace-regexp-in-string
+                                   (regexp-quote closing)
+                                   (concat (substring closing 0 -1) " " (substring closing -1))
+                                   line t t)))
+                     (when (equal (concat prefix line suffix) (plist-get template :end))
+                       (setq line (concat "," line)))
                      (concat prefix line suffix "\n"))
-                   lines ""))
+                   (mapcan (lambda (line) (split-string line "\n")) lines) ""))
     ""))
 
 (defun excalimacs--block-string (template path &optional lines)
@@ -684,13 +687,20 @@ Bundle names carry no content hash, so browsers must revalidate them."
               (push (list start end path) blocks))))
       (nreverse blocks)))))
 
-(defun excalimacs-refresh (&optional _path)
-  "Display drawing templates in the current buffer when the minor mode is on."
+(defun excalimacs-refresh (&optional path)
+  "Display drawing templates, optionally refreshing only PATH."
   (interactive)
-  (mapc #'delete-overlay excalimacs--overlays)
-  (setq excalimacs--overlays nil)
+  (when path (setq path (file-truename path)))
+  (setq excalimacs--overlays
+        (seq-filter
+         (lambda (overlay)
+           (if (or (not path)
+                   (equal (file-truename (overlay-get overlay 'excalimacs-path)) path))
+               (progn (delete-overlay overlay) nil)
+             t))
+         excalimacs--overlays))
   (when excalimacs-minor-mode
-    (dolist (block (excalimacs--blocks))
+    (dolist (block (excalimacs--blocks path))
       (pcase-let ((`(,begin ,end ,file) block))
         (when (file-readable-p file)
           (clear-image-cache file)
@@ -708,12 +718,13 @@ Bundle names carry no content hash, so browsers must revalidate them."
 
 (defalias 'excalimacs-org-refresh #'excalimacs-refresh)
 
-(defun excalimacs--refresh-images (&optional _path)
-  "Refresh displayed drawings in open buffers."
+(defun excalimacs--refresh-images (&optional path)
+  "Refresh PATH's displayed drawings in open buffers, or all when nil."
+  (when path (setq path (file-truename path)))
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (bound-and-true-p excalimacs-minor-mode)
-        (excalimacs-refresh)))))
+        (excalimacs-refresh path)))))
 
 (defun excalimacs--refresh-after-change (begin end _old-length)
   "Display inserted drawings and restore overlays displaced by edits."
@@ -784,7 +795,7 @@ Bundle names carry no content hash, so browsers must revalidate them."
          (end (overlay-end overlay))
          (delete-file-p (and (file-exists-p file)
                              (pcase excalimacs-delete-file
-                               ('ask (y-or-n-p (format "Delete drawing file %s? " file)))
+                               ('ask (y-or-n-p (format "Permanently delete drawing file %s? " file)))
                                ('nil nil)
                                (_ t)))))
     (let ((inhibit-read-only '(excalimacs)))
@@ -896,8 +907,9 @@ Bundle names carry no content hash, so browsers must revalidate them."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when-let* ((template (excalimacs--template))
-                  ((excalimacs--text-p template)))
-        (let ((blocks (reverse (excalimacs--blocks path))))
+                  ((excalimacs--text-p template))
+                  (blocks (reverse (excalimacs--blocks path))))
+        (let ((body (excalimacs--body template lines)) changed)
           (dolist (block blocks)
             (pcase-let ((`(,begin ,end ,_file) block))
               (let ((inhibit-read-only '(excalimacs)))
@@ -907,25 +919,21 @@ Bundle names carry no content hash, so browsers must revalidate them."
                   (let ((body-begin (point)))
                     (goto-char end)
                     (forward-line 0)
-                    (delete-region body-begin (point))
-                    (goto-char body-begin)
-                    (insert (excalimacs--body template lines)))))))
-          (when (bound-and-true-p excalimacs-minor-mode)
-            (excalimacs-refresh)))))))
+                    (unless (equal body (buffer-substring-no-properties body-begin (point)))
+                      (delete-region body-begin (point))
+                      (goto-char body-begin)
+                      (insert body)
+                      (setq changed t)))))))
+          (when (and changed (bound-and-true-p excalimacs-minor-mode))
+            (excalimacs-refresh (file-truename path))))))))
 
 (httpd-servlet api/text application/json (_path _query request)
   (let ((path (excalimacs--session-path request)))
     (condition-case err
         (cond
-         ((not path) (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
-         ((not (equal (caar request) "POST"))
-          (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
-         ((not (excalimacs--allowed-origin-p request))
-          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         ((excalimacs--reject-request request '("POST")))
          (t
-          (let* ((data (json-parse-string (decode-coding-string
-                                          (cadr (assoc "Content" request)) 'utf-8)
-                                          :object-type 'hash-table :array-type 'list))
+          (let* ((data (excalimacs--request-json request nil t))
                  (hash (gethash "hash" data))
                  (lines (gethash "lines" data)))
             (unless (and (file-exists-p path)
@@ -944,11 +952,7 @@ Bundle names carry no content hash, so browsers must revalidate them."
   (let ((path (excalimacs--session-path request)))
     (condition-case err
         (cond
-         ((not path) (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
-         ((not (equal (caar request) "POST"))
-          (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
-         ((not (excalimacs--allowed-origin-p request))
-          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         ((excalimacs--reject-request request '("POST")))
          ((not (equal (cadr (assoc "X-Drawing-Hash" request))
                       (excalimacs--hash (excalimacs--read path))))
           (excalimacs--json-reply 409 '(("error" . "Drawing changed before preview arrived"))))
@@ -965,18 +969,26 @@ Bundle names carry no content hash, so browsers must revalidate them."
 (httpd-servlet api/agent application/json (_path _query request)
   (condition-case err
       (cond
-       ((not (excalimacs--session-path request))
-        (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
-       ((not (equal (caar request) "POST"))
-        (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
-       ((not (excalimacs--allowed-origin-p request))
-        (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+       ((excalimacs--reject-request request '("POST")))
        (t
-        (let* ((body (decode-coding-string (cadr (assoc "Content" request)) 'utf-8))
-               (id (gethash "id" (json-parse-string body))))
+        (let* ((data (excalimacs--request-json request))
+               (id (gethash "id" data))
+               (operation (gethash id excalimacs--agent-operations)))
           (unless (stringp id) (error "Invalid agent result"))
-          (puthash id body excalimacs--agent-results)
-          (excalimacs--json-reply 200 '(("ok" . t))))))
+          (cond
+           ((and operation (not (equal (car operation) (excalimacs--session-path request))))
+            (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+           ((eq (gethash "start" data) t)
+            ;; Claim immediately before execution, including work already sent to a tab.
+            (let ((run (eq (cdr operation) 'pending)))
+              (when run (setcdr operation 'running))
+              (excalimacs--json-reply 200 `(("run" . ,(if run t :false))))))
+           ((memq (cdr operation) '(running abandoned))
+            (when (eq (cdr operation) 'running)
+              (puthash id (json-serialize data) excalimacs--agent-results))
+            (remhash id excalimacs--agent-operations)
+            (excalimacs--json-reply 200 '(("ok" . t))))
+           (t (excalimacs--json-reply 409 '(("error" . "Operation is no longer active"))))))))
     (error
      (excalimacs--json-reply 400 `(("error" . ,(error-message-string err)))))))
 
@@ -1043,11 +1055,7 @@ Return non-nil on success; a socket that fails is closed."
   (let ((path (excalimacs--session-path request)))
     (condition-case err
         (cond
-         ((not path) (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
-         ((not (equal (caar request) "POST"))
-          (excalimacs--json-reply 405 '(("error" . "Method not allowed"))))
-         ((not (excalimacs--allowed-origin-p request))
-          (excalimacs--json-reply 403 '(("error" . "Forbidden"))))
+         ((excalimacs--reject-request request '("POST")))
          (t
           (let* ((text (decode-coding-string (cadr (assoc "Content" request)) 'utf-8))
                  (data (json-parse-string text)))
@@ -1075,6 +1083,7 @@ IMMEDIATE applies the edit without drawing it gradually."
     ;; Open first, so an invalid drawing leaves nothing queued to run later.
     (unless (excalimacs--live-sockets path)
       (excalimacs-open path))
+    (puthash id (cons path 'pending) excalimacs--agent-operations)
     (puthash path (append (gethash path excalimacs--agent-queue)
                           (list `((id . ,id) (op . ,op)
                                   (presentation
@@ -1099,12 +1108,23 @@ Return nil while pending, otherwise `ok', `conflict' or `error'."
             (t 'ok)))))
 
 (defun excalimacs-agent-cancel (id)
-  "Forget agent operation ID, so a timed-out command never runs later."
-  (remhash id excalimacs--agent-results)
-  (maphash (lambda (path ops)
-             (puthash path (seq-remove (lambda (op) (equal (alist-get 'id op) id)) ops)
-                      excalimacs--agent-queue))
-           excalimacs--agent-queue))
+  "Cancel pending ID, including work dispatched to a browser queue.
+Return `cancelled', `running' or `finished'.  Running edits cannot be undone
+by cancellation; discard their eventual reply when the caller has timed out."
+  (let ((operation (gethash id excalimacs--agent-operations)))
+    (cond
+     ((gethash id excalimacs--agent-results) 'finished)
+     ((memq (cdr operation) '(running abandoned))
+      (setcdr operation 'abandoned)
+      'running)
+     (t
+      (remhash id excalimacs--agent-operations)
+      (when operation
+        (let ((path (car operation)))
+          (puthash path (seq-remove (lambda (op) (equal (alist-get 'id op) id))
+                                   (gethash path excalimacs--agent-queue))
+                   excalimacs--agent-queue)))
+      'cancelled))))
 
 (defun excalimacs--server-running-p ()
   "Return non-nil if the Excalimacs listener is running."
@@ -1303,6 +1323,9 @@ TARGET, when non-nil, is an element=ID or group=ID viewport target."
   (interactive)
   (excalimacs--stop-listener)
   (clrhash excalimacs--sessions)
+  (clrhash excalimacs--agent-queue)
+  (clrhash excalimacs--agent-operations)
+  (clrhash excalimacs--agent-results)
   (excalimacs--log "Server stopped; all drawing access cleared")
   (excalimacs--diagnostics-schedule-refresh))
 

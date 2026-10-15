@@ -68,7 +68,7 @@ function check(element, version, fields, scene) {
   const get = (id) => byId.get(id);
   if (version === undefined || String(version) === String(versionOf(element, get))) return;
   const base = seen.get(element.id)?.get(String(version));
-  if (!base) throw conflict(element, scene);
+  if (!base || !fields) throw conflict(element, scene);
   const now = { ...element, text: textOf(element, get) };
   const changed = Object.fromEntries(fields
     .filter((field) => JSON.stringify(base[field]) !== JSON.stringify(now[field]))
@@ -153,9 +153,9 @@ function update(excalidrawAPI, changes) {
       element = newElementWith(element, {
         ...(linear(element) ? {} : { width: sized.width, height: sized.height }),
         boundElements: [...(element.boundElements || []).filter(({ id: bound }) => bound !== old?.id),
-          { type: "text", id: label.id }],
+          ...(label ? [{ type: "text", id: label.id }] : [])],
       });
-      added.push(label);
+      if (label) added.push(label);
     }
     put(element);
   }
@@ -200,7 +200,8 @@ function remove(excalidrawAPI, payload) {
   for (const [id, version] of targets) {
     const element = scene.find((candidate) => candidate.id === id && !candidate.isDeleted);
     if (!element) throw new Error(`No element with id: ${id}`);
-    check(element, version, ["text", ...GEOMETRY, ...STYLE], scene);
+    // Deleting removes every property, including rotation, bindings and points.
+    check(element, version, null, scene);
   }
   const ids = new Set(targets.map(([id]) => id));
   excalidrawAPI.updateScene({

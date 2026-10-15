@@ -28,8 +28,9 @@ backgroundColor, fillStyle, strokeWidth, strokeStyle, roughness, opacity and lin
 Moving or resizing a shape re-routes the arrows bound to it.
 
 People and other agents edit the same drawing. Pass the "version" you read to
-update or delete, exactly as given (labelled elements use "5:3"). Only the properties you change are checked: if someone else
-changed one of them since that version, nothing is applied and the command
+update or delete, exactly as given (labelled elements use "5:3"). Updates check
+the properties you change; deletion requires the full version to match.
+If someone changed those properties, nothing is applied and the command
 exits 3, printing "changed" ({property: {was, now}}) and "current". Combine
 both intents and retry with current.version; no re-read is needed.
 
@@ -77,16 +78,24 @@ trap 'rm -f "$request" "$output"' EXIT
   esac
 } > "$request"
 
-id=$(emacsclient --eval "(excalimacs-agent-submit \"$request\" $immediate)" | tr -d '"')
-# Operations queue behind each other's drawing, so allow about two minutes.
-for _ in $(seq 1200); do
+read_result() {
   case $(emacsclient --eval "(excalimacs-agent-result \"$id\" \"$output\")") in
-    nil) sleep 0.1 ;;
+    nil) return ;;
     ok) cat "$output"; echo; exit 0 ;;
     conflict) cat "$output"; echo; exit 3 ;;
     *) cat "$output"; echo; exit 1 ;;
   esac
+}
+
+id=$(emacsclient --eval "(excalimacs-agent-submit \"$request\" $immediate)" | tr -d '"')
+# Operations queue behind each other's drawing, so allow about two minutes.
+for _ in $(seq 1200); do
+  read_result
+  sleep 0.1
 done
-emacsclient --eval "(excalimacs-agent-cancel \"$id\")" >/dev/null
-echo "Timed out waiting for an Excalimacs tab to apply $op; cancelled it" >&2
+case $(emacsclient --eval "(excalimacs-agent-cancel \"$id\")") in
+  finished) read_result ;;
+  running) echo "Timed out waiting for $op; it is already executing and may still complete" >&2; exit 1 ;;
+esac
+echo "Timed out waiting for an Excalimacs tab to apply $op; cancelled before execution" >&2
 exit 1
